@@ -92,8 +92,11 @@ def optimal_threshold(
 
     if strategy == "youden":
         fpr, tpr, thresholds = roc_curve(yt, yp)
-        j = tpr - fpr
-        return float(thresholds[np.argmax(j)])
+        # sklearn >=1.3 prepends a sentinel thresholds[0] = inf; exclude it so
+        # argmax can never select an out-of-range value for probability scoring.
+        finite = np.isfinite(thresholds)
+        j = (tpr - fpr)[finite]
+        return float(thresholds[finite][np.argmax(j)])
 
     if strategy == "f1":
         prec, rec, thresholds = precision_recall_curve(yt, yp)

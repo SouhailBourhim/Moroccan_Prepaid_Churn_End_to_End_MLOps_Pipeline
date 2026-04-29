@@ -97,6 +97,18 @@ def test_optimal_threshold_f1_in_range(
     assert 0.0 <= t <= 1.0
 
 
+def test_optimal_threshold_youden_never_returns_inf() -> None:
+    # sklearn >=1.3 prepends thresholds[0]=inf in roc_curve; ensure the Youden
+    # strategy always returns a finite, probability-range value even when the
+    # best J score is at the boundary of the curve.
+    rng = np.random.default_rng(0)
+    y_true = np.array([0, 0, 0, 1], dtype=float)  # skewed — inf sentinel likely
+    y_prob = rng.uniform(0, 1, 4)
+    t = optimal_threshold(y_true, y_prob, strategy="youden")
+    assert np.isfinite(t)
+    assert 0.0 <= t <= 1.0
+
+
 def test_optimal_threshold_invalid_strategy(
     imbalanced_arrays: tuple[np.ndarray, np.ndarray],
 ) -> None:
