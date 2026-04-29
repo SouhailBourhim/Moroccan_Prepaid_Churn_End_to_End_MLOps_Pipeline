@@ -13,6 +13,7 @@ dependencies = [
     "scikit-learn>=1.4",
     "xgboost>=2.0",
     "lightgbm>=4.3",
+    "catboost>=1.2",
     "shap>=0.45",
     "mlflow>=2.12",
     "dvc>=3.49",
@@ -55,6 +56,11 @@ select = ["E", "F", "I", "N", "UP", "ANN"]
 # Renaming to x would diverge from every sklearn transformer in the ecosystem.
 ignore = ["N803", "N806"]
 
+[tool.ruff.lint.per-file-ignores]
+# ANN401: model parameters span XGBoost/LightGBM/CatBoost/sklearn class hierarchies;
+# a shared Protocol would need to cover shap.Explainer's broad acceptance surface.
+"src/models/*.py" = ["ANN401"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
@@ -66,6 +72,11 @@ ignore_missing_imports = true
 # disallow_subclassing_any for this module is the targeted fix; all other strict
 # checks remain active.
 module = "src.features.build_features"
+disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+# catboost ships no PEP 561 stubs; all other strict checks remain active.
+module = "src.models.*"
 disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
