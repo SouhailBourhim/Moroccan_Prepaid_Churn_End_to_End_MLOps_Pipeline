@@ -5,6 +5,7 @@ import pytest
 
 from src.features.build_features import (
     MissingIndicatorAdder,
+    ServiceAbsenceEncoder,
     ZeroImputer,
     MedianImputer,
     NumericFeatureEngineer,
@@ -13,6 +14,7 @@ from src.features.build_features import (
     TargetEncoder,
     TopPackEncoder,
     FeaturePipeline,
+    MNAR_MISSING_FLAGS,
     TENURE_ORDER,
 )
 
@@ -62,6 +64,49 @@ def test_missing_flags_created(sample_df: pd.DataFrame) -> None:
         assert out[f"{col}_missing"].isin([0, 1]).all()
 
 
+# ── ServiceAbsenceEncoder ─────────────────────────────────────────────────────
+
+
+def test_service_absence_requires_missing_flags(sample_df: pd.DataFrame) -> None:
+    # Must run after MissingIndicatorAdder so flags exist
+    with_flags = MissingIndicatorAdder().fit_transform(sample_df)
+    enc = ServiceAbsenceEncoder()
+    out = enc.fit_transform(with_flags)
+    assert "n_services_absent" in out.columns
+    assert "is_ghost_subscriber" in out.columns
+
+
+def test_service_absence_range(sample_df: pd.DataFrame) -> None:
+    with_flags = MissingIndicatorAdder().fit_transform(sample_df)
+    enc = ServiceAbsenceEncoder()
+    out = enc.fit_transform(with_flags)
+    n_flags = len([c for c in MNAR_MISSING_FLAGS if c in with_flags.columns])
+    assert out["n_services_absent"].between(0, n_flags).all()
+    assert out["is_ghost_subscriber"].isin([0, 1]).all()
+
+
+def test_service_absence_ghost_threshold(sample_df: pd.DataFrame) -> None:
+    # is_ghost_subscriber must be 1 whenever n_services_absent >= GHOST_THRESHOLD
+    with_flags = MissingIndicatorAdder().fit_transform(sample_df)
+    enc = ServiceAbsenceEncoder()
+    out = enc.fit_transform(with_flags)
+    mask_ghost = out["n_services_absent"] >= enc.GHOST_THRESHOLD
+    assert out.loc[mask_ghost, "is_ghost_subscriber"].eq(1).all()
+    assert out.loc[~mask_ghost, "is_ghost_subscriber"].eq(0).all()
+
+
+def test_service_absence_no_leakage(sample_df: pd.DataFrame) -> None:
+    # In real usage one MissingIndicatorAdder is fit on train and applied to both splits.
+    # Verify ServiceAbsenceEncoder produces consistent columns in that scenario.
+    miss_adder = MissingIndicatorAdder().fit(sample_df.iloc[:400])
+    train_flagged = miss_adder.transform(sample_df.iloc[:400])
+    test_flagged = miss_adder.transform(sample_df.iloc[400:])
+    enc = ServiceAbsenceEncoder().fit(train_flagged)
+    out_train = enc.transform(train_flagged)
+    out_test = enc.transform(test_flagged)
+    assert out_train.columns.tolist() == out_test.columns.tolist()
+
+
 # ── ZeroImputer ───────────────────────────────────────────────────────────────
 
 def test_zero_imputer_fills_na(sample_df: pd.DataFrame) -> None:
@@ -88,12 +133,15 @@ def test_median_imputer_no_leakage(sample_df: pd.DataFrame) -> None:
 # ── NumericFeatureEngineer ────────────────────────────────────────────────────
 
 def test_numeric_fe_creates_features(sample_df: pd.DataFrame) -> None:
-    # Pre-fill NAs for this test
     df = sample_df.copy().fillna(0)
     out = NumericFeatureEngineer().fit_transform(df)
-    for col in ["regularity_rate", "recharge_per_freq", "revenue_per_freq",
-                "total_calls", "n_active_call_types", "is_inactive", "has_data"]:
-        assert col in out.columns
+    expected = [
+        "regularity_rate", "recharge_per_freq", "revenue_per_freq", "data_per_freq",
+        "total_calls", "intl_calls", "n_active_call_types",
+        "is_inactive", "has_data", "has_calls", "has_intl_usage",
+    ]
+    for col in expected:
+        assert col in out.columns, f"Missing engineered feature: {col}"
 
 
 def test_regularity_rate_bounds(sample_df: pd.DataFrame) -> None:
@@ -102,6 +150,31 @@ def test_regularity_rate_bounds(sample_df: pd.DataFrame) -> None:
     out = NumericFeatureEngineer().fit_transform(df)
     assert (out["regularity_rate"] >= 0).all()
     assert (out["regularity_rate"] <= 1.0).all()
+
+
+def test_intl_calls_equals_zone_sum(sample_df: pd.DataFrame) -> None:
+    df = sample_df.copy().fillna(0)
+    out = NumericFeatureEngineer().fit_transform(df)
+    expected = df["ZONE1"] + df["ZONE2"]
+    pd.testing.assert_series_equal(
+        out["intl_calls"].reset_index(drop=True),
+        expected.reset_index(drop=True),
+        check_names=False,
+    )
+
+
+def test_has_intl_usage_consistent_with_intl_calls(sample_df: pd.DataFrame) -> None:
+    df = sample_df.copy().fillna(0)
+    out = NumericFeatureEngineer().fit_transform(df)
+    assert (out.loc[out["intl_calls"] > 0, "has_intl_usage"] == 1).all()
+    assert (out.loc[out["intl_calls"] == 0, "has_intl_usage"] == 0).all()
+
+
+def test_data_per_freq_zero_for_no_data(sample_df: pd.DataFrame) -> None:
+    df = sample_df.copy().fillna(0)
+    df["DATA_VOLUME"] = 0.0
+    out = NumericFeatureEngineer().fit_transform(df)
+    assert (out["data_per_freq"] == 0).all()
 
 
 # ── TenureEncoder ─────────────────────────────────────────────────────────────
@@ -145,9 +218,12 @@ def test_pipeline_fit_transform(sample_df: pd.DataFrame, target: pd.Series) -> N
     pipe = FeaturePipeline()
     out = pipe.fit_transform(sample_df, target)
     assert len(out) == len(sample_df)
-    assert "regularity_rate" in out.columns
-    assert "REGION_te" in out.columns
-    assert "top_pack_te" in out.columns
+    for col in [
+        "regularity_rate", "REGION_te", "top_pack_te",
+        "n_services_absent", "is_ghost_subscriber",
+        "intl_calls", "has_intl_usage", "data_per_freq",
+    ]:
+        assert col in out.columns, f"Pipeline output missing: {col}"
 
 
 def test_pipeline_train_test_consistency(sample_df: pd.DataFrame, target: pd.Series) -> None:
