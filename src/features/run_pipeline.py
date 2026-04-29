@@ -15,6 +15,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import joblib
 import mlflow
@@ -37,9 +38,9 @@ CONFIG_PATH = ROOT / "configs" / "base.yaml"
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _load_config(path: Path) -> dict:  # type: ignore[type-arg]
+def _load_config(path: Path) -> dict[str, Any]:
     with open(path) as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f)  # type: ignore[no-any-return]
 
 
 def _feature_stats(df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:

@@ -444,7 +444,7 @@ class FeaturePipeline(BaseEstimator, TransformerMixin):
         return Xt
 
     def fit_transform(self, X: pd.DataFrame, y: pd.Series | None = None) -> pd.DataFrame:
-        return self.fit(X, y).transform(X)  # type: ignore[arg-type]
+        return self.fit(X, y).transform(X)
 
 
 def get_model_features(df: pd.DataFrame) -> list[str]:
