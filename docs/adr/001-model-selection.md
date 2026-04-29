@@ -24,7 +24,7 @@ Train and compare four candidate classifiers via stratified 5-fold cross-validat
 | # | Candidate | Role | Imbalance handling |
 |---|-----------|------|--------------------|
 | 1 | `LogisticRegression` | Interpretable linear baseline | `class_weight='balanced'` |
-| 2 | `XGBoostClassifier` | Gradient boosting — accuracy reference | `scale_pos_weight = n_neg / n_pos` |
+| 2 | `XGBClassifier` | Gradient boosting — accuracy reference | `scale_pos_weight = n_neg / n_pos` |
 | 3 | `LGBMClassifier` | Leaf-wise boosting — speed reference | `is_unbalance=True` |
 | 4 | `CatBoostClassifier` | Robust GBDT — primary challenger | `auto_class_weights='Balanced'` |
 

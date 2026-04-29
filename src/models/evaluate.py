@@ -42,14 +42,27 @@ def compute_metrics(
     y_prob: np.ndarray | pd.Series,
     threshold: float = 0.5,
 ) -> dict[str, float]:
-    """Return a standard set of binary classification metrics."""
+    """Return a standard set of binary classification metrics.
+
+    Returns NaN for ranking metrics (ROC-AUC, PR-AUC) when only one class is
+    present in y_true, rather than raising. Threshold-based metrics (F1,
+    precision, recall) are still computed as normal.
+    """
     yt = np.asarray(y_true)
     yp = np.asarray(y_prob)
     yhat = (yp >= threshold).astype(int)
 
+    n_classes = len(np.unique(yt))
+    if n_classes < 2:
+        roc_auc = float("nan")
+        pr_auc = float("nan")
+    else:
+        roc_auc = float(roc_auc_score(yt, yp))
+        pr_auc = float(average_precision_score(yt, yp))
+
     return {
-        "roc_auc": float(roc_auc_score(yt, yp)),
-        "pr_auc": float(average_precision_score(yt, yp)),
+        "roc_auc": roc_auc,
+        "pr_auc": pr_auc,
         "brier": float(brier_score_loss(yt, yp)),
         "f1": float(f1_score(yt, yhat, zero_division=0)),
         "precision": float(precision_score(yt, yhat, zero_division=0)),
@@ -109,7 +122,9 @@ def threshold_at_recall(
     # precision_recall_curve appends a sentinel point; align with thresholds
     mask = rec[:-1] >= min_recall
     if not mask.any():
-        return float(thresholds[0])
+        # Recall floor is unattainable at any threshold — return the lowest
+        # threshold to maximise recall (predict as many positives as possible).
+        return float(thresholds[-1])
     return float(thresholds[mask][-1])
 
 

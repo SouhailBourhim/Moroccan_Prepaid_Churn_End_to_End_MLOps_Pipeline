@@ -132,14 +132,17 @@ def test_threshold_at_recall_achieves_floor(
     assert actual_recall >= min_recall - 0.05
 
 
-def test_threshold_at_recall_falls_back_on_impossible_recall(
+def test_threshold_at_recall_falls_back_to_lowest_threshold_when_floor_unattainable(
     imbalanced_arrays: tuple[np.ndarray, np.ndarray],
 ) -> None:
+    from sklearn.metrics import precision_recall_curve
+
     y_true, y_prob = imbalanced_arrays
-    # Recall of 1.0 is achievable (predict everything positive), so this is not
-    # truly impossible; use 0.0 to test that the function always returns a float.
-    t = threshold_at_recall(y_true, y_prob, min_recall=0.0)
-    assert isinstance(t, float)
+    # min_recall > 1.0 is impossible — the fallback should return the lowest
+    # threshold in the PR curve (maximise recall rather than defaulting to the highest).
+    t = threshold_at_recall(y_true, y_prob, min_recall=1.1)
+    _prec, _rec, thresholds = precision_recall_curve(y_true, y_prob)
+    assert t == pytest.approx(float(thresholds[-1]))
 
 
 # ── build_candidates ──────────────────────────────────────────────────────────

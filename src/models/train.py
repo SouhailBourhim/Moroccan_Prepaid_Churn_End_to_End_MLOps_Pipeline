@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -244,7 +245,11 @@ def train(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> CVResult:
     # ── 2. Build candidates ───────────────────────────────────────────────────
     n_pos = float(y.sum())
     n_neg = float(len(y)) - n_pos
-    scale_pos_weight = n_neg / n_pos
+    if n_pos == 0:
+        logger.warning("No positive labels found — defaulting scale_pos_weight to 1.0")
+        scale_pos_weight = 1.0
+    else:
+        scale_pos_weight = n_neg / n_pos
     logger.info(
         f"Class ratio: {n_neg:.0f} neg / {n_pos:.0f} pos  "
         f"scale_pos_weight={scale_pos_weight:.2f}"
@@ -300,6 +305,7 @@ def train(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> CVResult:
                 "roc_auc_std": r.roc_auc_std,
                 "pr_auc_mean": r.pr_auc_mean,
                 "pr_auc_std": r.pr_auc_std,
+                "params": r.params,
             }
             for r in results
         ],
@@ -314,7 +320,13 @@ def train(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> CVResult:
     # ── 7. MLflow ─────────────────────────────────────────────────────────────
     if use_mlflow:
         mlflow_cfg = cfg.get("mlflow", {})
-        mlflow.set_tracking_uri(str(ROOT / mlflow_cfg.get("tracking_uri", "mlruns")))
+        tracking_uri = str(mlflow_cfg.get("tracking_uri", "mlruns"))
+        # Respect absolute paths and remote URIs; only prefix ROOT for relative paths.
+        if "://" in tracking_uri or os.path.isabs(tracking_uri):
+            resolved_uri = tracking_uri
+        else:
+            resolved_uri = str(ROOT / tracking_uri)
+        mlflow.set_tracking_uri(resolved_uri)
         mlflow.set_experiment(mlflow_cfg.get("experiment_name", "moroccan_prepaid_churn"))
 
         with mlflow.start_run(run_name=f"training__{best.name}"):
