@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+dist/
+build/
+*.egg-info/
+.eggs/
+*.egg
+
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# Data – track via DVC, not git
+data/raw/
+data/processed/
+data/features/
+data/interim/
+*.csv
+*.parquet
+*.feather
+!data/.gitkeep
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Notebooks – strip outputs before commit
+notebooks/.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Docker
+.docker/
+
+# DVC
+/tmp
+
+# Test / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Node (dashboard)
+dashboard/node_modules/
+dashboard/.next/
+dashboard/build/

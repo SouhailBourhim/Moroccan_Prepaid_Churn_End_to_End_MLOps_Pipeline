@@ -1,0 +1,46 @@
+data:
+  raw_dir: data/raw/expresso
+  processed_dir: data/processed
+  features_dir: data/features
+
+features:
+  top_pack_min_freq: 200
+  target_enc_smoothing: 20.0
+  regularity_inactive_threshold: 5
+
+training:
+  random_state: 42
+  test_size: 0.2
+  cv_folds: 5
+  eval_metric: roc_auc
+  early_stopping_rounds: 50
+
+xgboost:
+  n_estimators: 1000
+  max_depth: 7
+  learning_rate: 0.05
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_weight: 50
+  reg_alpha: 0.1
+  reg_lambda: 1.0
+
+lightgbm:
+  n_estimators: 1000
+  max_depth: 7
+  learning_rate: 0.05
+  num_leaves: 127
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_samples: 100
+  reg_alpha: 0.1
+  reg_lambda: 1.0
+
+mlflow:
+  experiment_name: moroccan_prepaid_churn
+  tracking_uri: mlruns
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  workers: 4
