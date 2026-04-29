@@ -4,7 +4,6 @@ from typing import Any
 
 import pandas as pd
 
-
 REQUIRED_COLS = [
     "user_id", "REGION", "TENURE", "MONTANT", "FREQUENCE_RECH",
     "REVENUE", "ARPU_SEGMENT", "FREQUENCE", "DATA_VOLUME",

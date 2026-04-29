@@ -15,15 +15,15 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import joblib
 import mlflow
-import numpy as np
 import pandas as pd
 import yaml
 from loguru import logger
 
-from src.data.ingestion import load_train, load_test
+from src.data.ingestion import load_test, load_train
 from src.data.validation import validate_raw
 from src.features.build_features import FeaturePipeline, get_model_features
 from src.utils.logging import setup_logger
@@ -38,9 +38,9 @@ CONFIG_PATH = ROOT / "configs" / "base.yaml"
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _load_config(path: Path) -> dict:  # type: ignore[type-arg]
+def _load_config(path: Path) -> dict[str, Any]:
     with open(path) as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f)  # type: ignore[no-any-return]
 
 
 def _feature_stats(df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
@@ -122,7 +122,9 @@ def run(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> None:
 
     null_features = stats[stats["null_rate"] > 0]["null_rate"]
     if len(null_features):
-        logger.warning(f"Features with remaining nulls after pipeline:\n{null_features.to_string()}")
+        logger.warning(
+            f"Features with remaining nulls after pipeline:\n{null_features.to_string()}"
+        )
 
     # ── 5. Save artifacts ─────────────────────────────────────────────────────
     logger.info("Saving features to parquet…")
@@ -163,8 +165,9 @@ def run(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> None:
         with mlflow.start_run(run_name="feature_engineering"):
             # Parameters
             mlflow.log_param("n_features", len(feature_cols))
-            mlflow.log_param("top_pack_min_freq", cfg.get("features", {}).get("top_pack_min_freq", 200))
-            mlflow.log_param("target_enc_smoothing", cfg.get("features", {}).get("target_enc_smoothing", 20.0))
+            features_cfg = cfg.get("features", {})
+            mlflow.log_param("top_pack_min_freq", features_cfg.get("top_pack_min_freq", 200))
+            mlflow.log_param("target_enc_smoothing", features_cfg.get("target_enc_smoothing", 20.0))
 
             # Metrics
             mlflow.log_metric("n_train_rows", len(train_out))
@@ -183,8 +186,9 @@ def run(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> None:
             mlflow.log_artifact(str(FEATURES_DIR / "feature_manifest.json"), "feature_engineering")
             mlflow.log_artifact(str(FEATURES_DIR / "feature_pipeline.pkl"), "feature_engineering")
 
-            run_id = mlflow.active_run().info.run_id  # type: ignore[union-attr]
-            logger.info(f"MLflow run logged: {run_id}")
+            active_run = mlflow.active_run()
+            if active_run is not None:
+                logger.info(f"MLflow run logged: {active_run.info.run_id}")
 
     total = time.perf_counter() - t0
     logger.info(f"Feature engineering complete in {total:.1f}s")

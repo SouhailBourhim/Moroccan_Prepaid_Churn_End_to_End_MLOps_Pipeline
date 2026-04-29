@@ -38,6 +38,7 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.4",
     "mypy>=1.10",
+    "types-PyYAML>=6.0",
     "pre-commit>=3.7",
     "jupyter>=1.0",
     "ipykernel>=6",
@@ -50,12 +51,22 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "ANN"]
-ignore = ["ANN101", "ANN102"]
+# N803/N806: sklearn convention uses uppercase X for the feature matrix in fit/transform.
+# Renaming to x would diverge from every sklearn transformer in the ecosystem.
+ignore = ["N803", "N806"]
 
 [tool.mypy]
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# sklearn ships no PEP 561 stubs, so BaseEstimator and TransformerMixin resolve
+# as Any. strict mode then rejects subclassing Any ([misc]). Disabling
+# disallow_subclassing_any for this module is the targeted fix; all other strict
+# checks remain active.
+module = "src.features.build_features"
+disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
