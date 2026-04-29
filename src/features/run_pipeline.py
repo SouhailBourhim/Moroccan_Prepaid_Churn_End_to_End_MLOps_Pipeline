@@ -186,8 +186,9 @@ def run(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> None:
             mlflow.log_artifact(str(FEATURES_DIR / "feature_manifest.json"), "feature_engineering")
             mlflow.log_artifact(str(FEATURES_DIR / "feature_pipeline.pkl"), "feature_engineering")
 
-            run_id = mlflow.active_run().info.run_id  # type: ignore[union-attr]
-            logger.info(f"MLflow run logged: {run_id}")
+            active_run = mlflow.active_run()
+            if active_run is not None:
+                logger.info(f"MLflow run logged: {active_run.info.run_id}")
 
     total = time.perf_counter() - t0
     logger.info(f"Feature engineering complete in {total:.1f}s")
