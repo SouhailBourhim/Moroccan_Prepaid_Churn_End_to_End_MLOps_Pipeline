@@ -1,6 +1,5 @@
 """Raw data loading with dtypes and basic validation."""
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -28,14 +27,14 @@ DTYPES: dict[str, str] = {
 }
 
 
-def load_train(path: Optional[Path] = None, nrows: Optional[int] = None) -> pd.DataFrame:
+def load_train(path: Path | None = None, nrows: int | None = None) -> pd.DataFrame:
     p = path or RAW_DIR / "Train.csv"
     df = pd.read_csv(p, dtype=DTYPES, nrows=nrows, low_memory=False)
     df["CHURN"] = df["CHURN"].astype("int8")
     return df
 
 
-def load_test(path: Optional[Path] = None) -> pd.DataFrame:
+def load_test(path: Path | None = None) -> pd.DataFrame:
     p = path or RAW_DIR / "Test.csv"
     return pd.read_csv(p, dtype=DTYPES, low_memory=False)
 

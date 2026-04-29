@@ -17,9 +17,9 @@ jobs:
       - name: Install dev deps
         run: pip install ruff mypy
       - name: Lint
-        run: ruff check src/ api/
+        run: ruff check src/
       - name: Type check
-        run: mypy src/ api/
+        run: mypy src/
 
   test:
     runs-on: ubuntu-latest

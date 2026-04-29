@@ -9,8 +9,6 @@ Design principles (grounded in cross-dataset EDA — notebooks/01–04):
 from __future__ import annotations
 
 import inspect
-from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -65,7 +63,7 @@ class MissingIndicatorAdder(BaseEstimator, TransformerMixin):
     def __init__(self, cols: list[str] | None = None) -> None:
         self.cols = cols
 
-    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> "MissingIndicatorAdder":
+    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> MissingIndicatorAdder:
         self.cols_ = self.cols or [c for c in X.columns if X[c].isna().any()]
         return self
 
@@ -100,7 +98,7 @@ class ServiceAbsenceEncoder(BaseEstimator, TransformerMixin):
 
     GHOST_THRESHOLD: int = 5
 
-    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> "ServiceAbsenceEncoder":
+    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> ServiceAbsenceEncoder:
         self.present_flags_ = [c for c in MNAR_MISSING_FLAGS if c in X.columns]
         return self
 
@@ -131,7 +129,7 @@ class ZeroImputer(BaseEstimator, TransformerMixin):
     def __init__(self, cols: list[str] = MNAR_ZERO_COLS) -> None:
         self.cols = cols
 
-    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> "ZeroImputer":
+    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> ZeroImputer:
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -156,7 +154,7 @@ class MedianImputer(BaseEstimator, TransformerMixin):
     def __init__(self, cols: list[str] = MAR_MEDIAN_COLS) -> None:
         self.cols = cols
 
-    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> "MedianImputer":
+    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> MedianImputer:
         self.medians_: dict[str, float] = {}
         for col in self.cols:
             if col in X.columns:
@@ -209,7 +207,7 @@ class NumericFeatureEngineer(BaseEstimator, TransformerMixin):
     Transformer is stateless — no train information stored, no leakage risk.
     """
 
-    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> "NumericFeatureEngineer":
+    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> NumericFeatureEngineer:
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -251,7 +249,7 @@ class TenureEncoder(BaseEstimator, TransformerMixin):
 
     NEW_SUBSCRIBER_VALS: frozenset[str] = frozenset({"A < 2 month", "B 2 month"})
 
-    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> "TenureEncoder":
+    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> TenureEncoder:
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -272,7 +270,7 @@ class MRGEncoder(BaseEstimator, TransformerMixin):
     (plan engagement = loyalty signal, notebook 04).
     """
 
-    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> "MRGEncoder":
+    def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> MRGEncoder:
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -305,7 +303,7 @@ class TargetEncoder(BaseEstimator, TransformerMixin):
         self.smoothing = smoothing
         self.min_samples = min_samples
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "TargetEncoder":
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> TargetEncoder:
         self.global_mean_: float = float(y.mean())
         self.maps_: dict[str, dict[str, float]] = {}
 
@@ -351,7 +349,7 @@ class TopPackEncoder(BaseEstimator, TransformerMixin):
         self.min_freq = min_freq
         self.smoothing = smoothing
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "TopPackEncoder":
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> TopPackEncoder:
         if "TOP_PACK" not in X.columns:
             return self
 
@@ -422,7 +420,7 @@ class FeaturePipeline(BaseEstimator, TransformerMixin):
             ("top_pack_enc", TopPackEncoder()),
         ]
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "FeaturePipeline":
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> FeaturePipeline:
         self._build()
         Xt = X.copy()
         for _name, step in self._steps:
@@ -445,7 +443,7 @@ class FeaturePipeline(BaseEstimator, TransformerMixin):
             Xt = step.transform(Xt)
         return Xt
 
-    def fit_transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> pd.DataFrame:
+    def fit_transform(self, X: pd.DataFrame, y: pd.Series | None = None) -> pd.DataFrame:
         return self.fit(X, y).transform(X)  # type: ignore[arg-type]
 
 
