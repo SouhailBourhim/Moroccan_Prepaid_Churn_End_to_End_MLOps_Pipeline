@@ -208,3 +208,55 @@ def test_build_candidates_params_logged() -> None:
     xgb = next(c for c in candidates if c.name == "xgboost")
     assert "scale_pos_weight" in xgb.params
     assert xgb.params["scale_pos_weight"] == pytest.approx(3.0)
+
+
+# ── tune: _suggest_params + _patch_config ────────────────────────────────────
+
+
+def test_suggest_params_keys_and_ranges() -> None:
+    """_suggest_params must produce a dict with all required CatBoost keys."""
+    import optuna
+
+    from src.models.tune import _suggest_params
+
+    study = optuna.create_study(direction="maximize")
+    trial = study.ask()
+    params = _suggest_params(trial, random_state=42)
+
+    required = {
+        "depth", "learning_rate", "l2_leaf_reg",
+        "subsample", "colsample_bylevel", "min_data_in_leaf",
+        "iterations", "auto_class_weights",
+    }
+    assert required <= set(params)
+    assert 4 <= params["depth"] <= 10
+    assert 0.005 <= params["learning_rate"] <= 0.3
+    assert params["auto_class_weights"] == "Balanced"
+
+
+def test_patch_config_updates_catboost_section(tmp_path: pytest.TempPathFactory) -> None:
+    """_patch_config must rewrite the catboost block without touching other keys."""
+    import yaml
+
+    from src.models.tune import _patch_config
+
+    cfg_path = tmp_path / "base.yaml"  # type: ignore[operator]
+    cfg_path.write_text(
+        "training:\n  random_state: 42\ncatboost:\n  depth: 7\n  iterations: 1000\n"
+    )
+
+    best: dict[str, object] = {
+        "depth": 6,
+        "learning_rate": 0.02,
+        "l2_leaf_reg": 5.0,
+        "subsample": 0.75,
+        "colsample_bylevel": 0.6,
+        "min_data_in_leaf": 80,
+        "mean_best_iteration": 450,
+    }
+    _patch_config(cfg_path, best)  # type: ignore[arg-type]
+
+    updated = yaml.safe_load(cfg_path.read_text())
+    assert updated["catboost"]["depth"] == 6
+    assert updated["catboost"]["iterations"] == 450
+    assert updated["training"]["random_state"] == 42  # unchanged

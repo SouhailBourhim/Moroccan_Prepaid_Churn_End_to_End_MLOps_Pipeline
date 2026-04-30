@@ -14,8 +14,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install dev deps
-        run: pip install ruff mypy types-PyYAML
+          cache: pip
+      - name: Install lint deps
+        # Install the package (so mypy can resolve internal imports) plus
+        # the required type stubs. Heavy ML deps (catboost, xgboost…) are
+        # excluded here via --no-deps on the package itself; mypy only needs
+        # the source tree, not the compiled extensions.
+        run: |
+          pip install ruff mypy types-PyYAML
+          pip install --no-deps -e .
+          pip install pandas numpy scikit-learn fastapi pydantic loguru joblib mlflow pyyaml
       - name: Lint
         run: ruff check src/
       - name: Type check
