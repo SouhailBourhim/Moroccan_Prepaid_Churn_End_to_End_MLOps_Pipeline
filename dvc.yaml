@@ -1,0 +1,49 @@
+stages:
+
+  featurize:
+    cmd: python -m src.features.run_pipeline --no-mlflow
+    deps:
+      - src/data/ingestion.py
+      - src/data/validation.py
+      - src/features/build_features.py
+      - src/features/run_pipeline.py
+      - data/raw/expresso/Train.csv
+      - data/raw/expresso/Test.csv
+    params:
+      - configs/base.yaml:
+          - features
+    outs:
+      - data/features/train_features.parquet
+      - data/features/test_features.parquet
+      - data/features/feature_pipeline.pkl
+      - data/features/feature_stats.csv
+      - data/features/feature_manifest.json
+
+  train:
+    cmd: python -m src.models.train --no-mlflow
+    deps:
+      - src/models/train.py
+      - data/features/train_features.parquet
+    params:
+      - configs/base.yaml:
+          - training
+          - xgboost
+          - lightgbm
+          - catboost
+          - logistic_regression
+    outs:
+      - models/best_model.pkl
+    metrics:
+      - models/training_manifest.json:
+          cache: false
+
+  evaluate:
+    cmd: python -m src.models.evaluate_run
+    deps:
+      - src/models/evaluate_run.py
+      - src/models/evaluate.py
+      - models/best_model.pkl
+      - data/features/train_features.parquet
+    metrics:
+      - models/eval_metrics.json:
+          cache: false

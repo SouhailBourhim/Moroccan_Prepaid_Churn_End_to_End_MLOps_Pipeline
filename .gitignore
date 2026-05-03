@@ -16,11 +16,11 @@ venv/
 env/
 
 # Data – track via DVC, not git
-data/raw/
+# data/raw/ is intentionally NOT listed: DVC writes per-directory .gitignore
+# files inside it so the .dvc pointer files stay git-tracked.
 data/processed/
 data/features/
 data/interim/
-*.csv
 *.parquet
 *.feather
 !data/.gitkeep
