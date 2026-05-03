@@ -1,333 +1,262 @@
 # Moroccan Prepaid Churn — End-to-End MLOps Pipeline
 
-Production-grade churn prediction for prepaid telecom subscribers using the [Expresso Telecom dataset](https://zindi.africa/competitions/expresso-churn-prediction) (Senegal). Target metric: **ROC-AUC**. Class imbalance ~18.75% churn.
+Production-grade churn prediction for prepaid telecom subscribers using the [Expresso Telecom dataset](https://zindi.africa/competitions/expresso-churn-prediction) (Senegal, 2.15M subscribers). Target metric: **ROC-AUC**. Class imbalance: **18.75% churn**.
+
+> **Holdout ROC-AUC: 0.9330 · PR-AUC: 0.7071 · Brier: 0.1119** (CatBoost, 20% stratified holdout)
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Clone and set up
-git clone <repo-url>
+# 1. Clone and install
+git clone https://github.com/SouhailBourhim/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline
 cd Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. Place raw data (see Data Setup below)
+# 2. Pull raw data via DVC (requires a configured remote)
+dvc pull
+# or place Train.csv / Test.csv manually in data/raw/expresso/
 
-# 3. Run tests
-pytest
+# 3. Run the full pipeline
+dvc repro
 
-# 4. Run the feature engineering pipeline (saves to data/features/, logs to MLflow)
-python -m src.features.run_pipeline
+# 4. Start the API
+uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
+# → http://localhost:8000/docs
 
-# 5. Open notebooks
-jupyter notebook notebooks/
+# 5. Or run via Docker
+docker compose up --build
 ```
 
 ---
 
 ## Project Status
 
-| Phase | Status | Output |
-|-------|--------|--------|
-| EDA — Expresso | Done | `notebooks/01_eda.ipynb` |
-| EDA — Cell2Cell (reference) | Done | `notebooks/02_eda_cell2cell.ipynb` |
-| EDA — Orange Telecom (reference) | Done | `notebooks/03_eda_orange.ipynb` |
-| Cross-dataset analysis | Done | `notebooks/04_cross_dataset_analysis.ipynb` |
-| Feature engineering | Done | `notebooks/05_feature_engineering.ipynb`, `data/features/` |
-| Modelling (XGBoost / LightGBM) | Next | `src/models/` |
-| SHAP explainability | Planned | — |
-| FastAPI `/predict` endpoint | Planned | `api/` |
-| Docker + CI | Planned | `docker/` |
-| React dashboard | Planned | `dashboard/` |
-
----
-
-## Datasets
-
-### Primary: Expresso Telecom (Senegal)
-
-The training and evaluation dataset. Sourced from the [Zindi Expresso Churn Challenge](https://zindi.africa/competitions/expresso-churn-prediction).
-
-| Split | Rows | Columns | Churn Rate |
-|-------|------|---------|------------|
-| Train | 2,154,048 | 19 | 18.75% |
-| Test | 380,127 | 18 | — |
-
-Key characteristics: prepaid subscribers, West Africa, heavy missingness (35–94% in usage columns), MNAR patterns encode inactivity.
-
-### Reference: Cell2Cell Wireless (USA)
-
-Used for cross-dataset feature validation only — **not used for training**.
-
-| Split | Rows | Columns | Churn Rate |
-|-------|------|---------|------------|
-| Train | 51,047 | 58 | 28.82% |
-| Holdout | 20,000 | 58 | — |
-
-Source: [Kaggle — datasets-for-churn-telecom](https://www.kaggle.com/datasets/jpacse/datasets-for-churn-telecom)
-
-### Reference: Orange Telecom (USA)
-
-Used for cross-dataset feature validation only — **not used for training**.
-
-| Split | Rows | Columns | Churn Rate |
-|-------|------|---------|------------|
-| Train (80%) | 2,666 | 20 | 14.55% |
-| Test (20%) | 667 | 20 | — |
-
-Source: [Kaggle — telecom-churn-datasets](https://www.kaggle.com/datasets/mnassrib/telecom-churn-datasets)
-
----
-
-## Cross-Dataset Feature Evidence
-
-The reference datasets identify features that predict churn regardless of operator or geography. Features with strong signal across all three are treated as robust; features that only work on Expresso may be dataset-specific noise.
-
-### Robustness Scorecard (`notebooks/04_cross_dataset_analysis.ipynb`)
-
-| Feature Concept | Expresso \|ρ\| | Cell2Cell \|ρ\| | Orange \|ρ\| | Verdict |
-|----------------|----------------|-----------------|--------------|---------|
-| **Engagement / Activity** | **0.53** | 0.05 | 0.10 | Robust — universal disengagement signal |
-| **Revenue / Spend Level** | 0.19 | 0.02 | 0.18 | Robust — low spend = low commitment |
-| **Call Volume** | 0.20 | 0.06 | 0.17 | Robust — low usage predicts churn |
-| **Plan Engagement** | 0.13 | 0.04 | 0.26 | Robust — plan adoption = loyalty |
-| **Customer Service Friction** | *(no feature)* | 0.05 | **0.14** | Robust where available — engineered as `n_services_absent` proxy |
-| **Tenure** | strong (DT) | strong (DT) | weak | Conditional — encoding matters |
-| **International / Roaming** | 0.11 | 0.07 | mixed | Mixed — plan enrollment > actual usage |
-
-> **Key insight**: The core signal is *disengagement*. Expresso's `REGULARITY` (days active / 90) directly captures this — it is the dominant predictor (Spearman ρ = 0.53). The `ServiceAbsenceEncoder` translates the cross-dataset customer-friction finding (strongest predictor in Orange and Cell2Cell, absent from Expresso) into a proxy via MNAR missingness patterns; it achieves ρ = **0.47** on Expresso.
+| Phase | Status | Key output |
+|-------|--------|------------|
+| EDA — Expresso | ✅ Done | `notebooks/01_eda.ipynb` |
+| EDA — Cell2Cell (reference) | ✅ Done | `notebooks/02_eda_cell2cell.ipynb` |
+| EDA — Orange Telecom (reference) | ✅ Done | `notebooks/03_eda_orange.ipynb` |
+| Cross-dataset analysis | ✅ Done | `notebooks/04_cross_dataset_analysis.ipynb` |
+| Feature engineering | ✅ Done | `src/features/`, `data/features/` |
+| Model training (4-candidate CV) | ✅ Done | `src/models/train.py`, `models/best_model.pkl` |
+| Hyperparameter tuning (Optuna) | ✅ Done | `src/models/tune.py` |
+| Model evaluation | ✅ Done | `notebooks/06_model_evaluation.ipynb`, `models/eval_metrics.json` |
+| FastAPI serving endpoint | ✅ Done | `src/api/`, port 8000 |
+| Docker containerisation | ✅ Done | `Dockerfile`, `docker-compose.yml` |
+| DVC reproducible pipeline | ✅ Done | `dvc.yaml` (featurize → train → evaluate) |
+| CI/CD | ✅ Done | `.github/workflows/ci.yml` |
+| Drift monitoring | 🔜 Next | — |
 
 ---
 
 ## Architecture
 
 ```
-configs/base.yaml                  ← single source of truth: paths, hyperparameters, services
+configs/base.yaml              ← single source of truth: all hyperparams & paths
 
 data/
-  raw/
-    expresso/                      ← Train.csv, Test.csv, VariableDefinitions.csv  (DVC-tracked)
-    cell2cell/                     ← cell2celltrain.csv, cell2cellholdout.csv       (DVC-tracked)
-    orange/                        ← churn-bigml-80.csv, churn-bigml-20.csv         (DVC-tracked)
-  features/                        ← generated by run_pipeline.py
-    train_features.parquet         ← 2,154,048 rows × 44 features + CHURN  (54 MB)
-    test_features.parquet          ← 380,127 rows × 44 features             (23 MB)
-    feature_pipeline.pkl           ← fitted FeaturePipeline (for inference)
-    feature_stats.csv              ← per-feature null rate, mean, Spearman ρ
-    feature_manifest.json          ← feature names, churn rate, row counts
+  raw/expresso/                ← Train.csv (247 MB), Test.csv (43 MB) — DVC-tracked
+  features/                   ← generated artifacts (parquet, pkl, json)
 
 src/
   data/
-    ingestion.py                   ← load_train / load_test with explicit dtypes
-    validation.py                  ← validate_raw() → ValidationReport
+    ingestion.py               ← load_train / load_test with explicit dtypes
+    validation.py              ← validate_raw() → ValidationReport
   features/
-    build_features.py              ← FeaturePipeline + 9 sklearn-compatible transformers
-    run_pipeline.py                ← end-to-end runner: load → validate → fit → save → MLflow
-  models/                          ← (next) training scripts and model wrappers
+    build_features.py          ← FeaturePipeline (9 transformers) + get_model_features()
+    run_pipeline.py            ← load → validate → fit → save → MLflow
+  models/
+    train.py                   ← 4-candidate CV training + MLflow logging
+    tune.py                    ← Optuna CatBoost search (stratified subsample)
+    evaluate.py                ← metric utilities, threshold selection, SHAP
+    evaluate_run.py            ← standalone holdout eval (DVC stage output)
+    predict.py                 ← CLI inference on raw CSV
+  api/
+    app.py                     ← FastAPI: /health /ready /info /predict
+    schemas.py                 ← Pydantic request/response models
+    dependencies.py            ← ModelArtifacts loader (singleton on startup)
   utils/
-    logging.py                     ← loguru setup; call setup_logger() at entry points
+    logging.py                 ← loguru setup
+
+models/                        ← DVC-tracked artifacts
+  best_model.pkl               ← fitted CatBoost + feature_cols list
+  training_manifest.json       ← CV results for all 4 candidates
+  eval_metrics.json            ← holdout metrics (DVC metric)
 
 notebooks/
-  01_eda.ipynb                     ← Expresso EDA
-  02_eda_cell2cell.ipynb           ← Cell2Cell reference EDA
-  03_eda_orange.ipynb              ← Orange Telecom reference EDA
-  04_cross_dataset_analysis.ipynb  ← Cross-dataset robustness analysis
-  05_feature_engineering.ipynb     ← Feature engineering walkthrough + validation
+  01–04_eda*.ipynb             ← EDA on 3 datasets + cross-dataset analysis
+  05_feature_engineering.ipynb ← pipeline walkthrough + validation
+  06_model_evaluation.ipynb    ← CV comparison, ROC/PR/calibration, SHAP
 
-tests/
-  test_features.py                 ← 17 unit tests covering every transformer
+docs/
+  adr/001-model-selection.md   ← why CatBoost + XGBoost + LightGBM + LR
+  PROJECT.md                   ← full technical + functional documentation
 
-api/                               ← (planned) FastAPI inference endpoint
-dashboard/                         ← (planned) React monitoring dashboard
-docker/                            ← (planned) containerisation
+Dockerfile                     ← multi-stage build (3.3 GB; catboost is the floor)
+docker-compose.yml             ← mounts models/ and data/features/ as volumes
+dvc.yaml                       ← featurize → train → evaluate pipeline DAG
 ```
 
 ---
 
-## Feature Pipeline
+## Pipeline
 
-`FeaturePipeline` chains **9 transformers** in order. All are fit on train only and applied identically to train and test. The full decision rationale for each step is in `notebooks/05_feature_engineering.ipynb`.
-
-```
-Raw DataFrame (19 cols)
-        │
-        ▼
-1. MissingIndicatorAdder     → {col}_missing binary flags for all 14 columns with NaN
-        │                       Must run first — ServiceAbsenceEncoder reads these flags
-        ▼
-2. ServiceAbsenceEncoder     → n_services_absent [0–7], is_ghost_subscriber binary
-        │                       Cross-dataset proxy: customer service calls are the dominant
-        │                       predictor in Orange/Cell2Cell; Expresso has no such feature.
-        │                       Aggregating the 7 MNAR missing flags captures the same
-        │                       disengaged/absent segment (validated: ρ = 0.47 with churn)
-        ▼
-3. ZeroImputer               → MNAR columns → 0
-        │                       (DATA_VOLUME, ON_NET, ORANGE, TIGO, ZONE1, ZONE2, FREQ_TOP_PACK)
-        ▼
-4. MedianImputer             → MAR columns → training median
-        │                       (MONTANT, FREQUENCE_RECH, REVENUE, ARPU_SEGMENT, FREQUENCE)
-        ▼
-5. NumericFeatureEngineer    → regularity_rate, recharge_per_freq, revenue_per_freq,
-        │                       data_per_freq, total_calls, intl_calls,
-        │                       n_active_call_types, is_inactive, has_data,
-        │                       has_calls, has_intl_usage
-        ▼
-6. TenureEncoder             → tenure_ordinal [0–10] + is_new_subscriber flag
-        ▼
-7. MRGEncoder                → YES/NO → mrg_flag binary
-        ▼
-8. TargetEncoder(REGION)     → James–Stein smoothed target encoding → REGION_te
-        ▼
-9. TopPackEncoder            → rare-pack collapsing (min_freq=200)
-        │                       + frequency encode (top_pack_freq)
-        │                       + target encode (top_pack_te)
-        ▼
-get_model_features()         → drops user_id, CHURN, REGION, TENURE, MRG, TOP_PACK,
-                                ARPU_SEGMENT, ARPU_SEGMENT_missing
-                                (ARPU_SEGMENT ≡ REVENUE/3 exactly; its missing flag
-                                 is identical to REVENUE_missing — both are redundant)
-        │
-        ▼
-44 model-ready features, zero nulls
-```
-
-### Imputation strategy rationale
-
-| Columns | Strategy | Why |
-|---------|----------|-----|
-| `DATA_VOLUME`, `ON_NET`, `ORANGE`, `TIGO`, `ZONE1`, `ZONE2`, `FREQ_TOP_PACK` | 0 | MNAR: missing = never used that service. Churn rate 2–4× higher when missing. |
-| `MONTANT`, `FREQUENCE_RECH`, `REVENUE`, `ARPU_SEGMENT`, `FREQUENCE` | Training median | MAR: missingness correlates with churn but is not caused by service absence. |
-| `REGION`, `TOP_PACK` | Target encoding, unseen → global mean | Inference-safe: new categories receive the population churn rate. |
-
-### Feature signal summary (post-engineering)
-
-| Rank | Feature | Spearman ρ | Source |
-|------|---------|-----------|--------|
-| 1 | `is_inactive` (REGULARITY < 5) | 0.54 | Engineered |
-| 2 | `REGION_missing` | 0.54 | Missing indicator |
-| 3 | `REGULARITY` / `regularity_rate` | −0.53 | Raw + engineered |
-| 4 | `REVENUE_missing` | 0.48 | Missing indicator |
-| 5 | `n_services_absent` | 0.47 | **New — cross-dataset proxy** |
-| 6 | `is_ghost_subscriber` | 0.46 | **New — cross-dataset proxy** |
-| … | 32 of 44 features | \|ρ\| > 0.10 | — |
-
----
-
-## Running the Feature Pipeline
+### Running end-to-end
 
 ```bash
-# Runs in ~31 seconds on the full 2.15M-row dataset
-python -m src.features.run_pipeline
-
-# Skip MLflow logging (e.g., in CI)
-python -m src.features.run_pipeline --no-mlflow
+dvc repro                   # re-runs only changed stages
+dvc repro --force           # force full re-run
+dvc dag                     # visualise the DAG
+dvc metrics show            # print eval_metrics.json
+dvc metrics diff HEAD~1     # compare metrics to previous commit
 ```
 
-Or programmatically:
+### Running stages individually
 
-```python
-from src.data.ingestion import load_train, load_test
-from src.features.build_features import FeaturePipeline, get_model_features
-
-train = load_train()
-test  = load_test()
-
-pipeline = FeaturePipeline()
-X_train_fe = pipeline.fit_transform(train.drop(columns=["CHURN"]), train["CHURN"])
-X_test_fe  = pipeline.transform(test)
-
-feature_cols = get_model_features(X_train_fe)  # 44 features
+```bash
+python -m src.features.run_pipeline --no-mlflow   # featurize
+python -m src.models.train --no-mlflow             # train
+python -m src.models.evaluate_run                  # evaluate
+python -m src.models.tune --trials 50              # hyperparameter search
+python -m src.models.predict --threshold 0.4       # inference on Test.csv
 ```
 
 ---
 
-## Data Setup
+## Model Results
 
-Raw data is tracked via **DVC** and is not committed to git.
+Five-fold stratified CV on 2,154,048 training rows (default configs):
+
+| Model | CV ROC-AUC | CV PR-AUC |
+|-------|-----------|----------|
+| **CatBoost** ★ | **0.9316 ± 0.0005** | **0.7039** |
+| XGBoost | 0.9314 ± 0.0005 | 0.7039 |
+| LightGBM | 0.9313 ± 0.0005 | 0.7038 |
+| Logistic Regression | 0.9284 ± 0.0005 | 0.6899 |
+
+Holdout evaluation (20% stratified split, 430,810 rows):
+
+| Metric | Value |
+|--------|-------|
+| ROC-AUC | **0.9330** |
+| PR-AUC | **0.7071** |
+| Brier score | 0.1119 |
+| F1 at Youden-J threshold (0.501) | 0.679 |
+| Precision / Recall at Youden | 0.537 / 0.923 |
+| F1 at F1-optimal threshold (0.689) | 0.702 |
+
+Rationale for model selection: see [`docs/adr/001-model-selection.md`](docs/adr/001-model-selection.md).
+
+---
+
+## API
 
 ```bash
-# After installing DVC and configuring remote storage:
-dvc pull
-
-# Or place files manually:
-data/raw/expresso/Train.csv
-data/raw/expresso/Test.csv
-data/raw/expresso/VariableDefinitions.csv
-data/raw/cell2cell/cell2celltrain.csv
-data/raw/cell2cell/cell2cellholdout.csv
-data/raw/orange/churn-bigml-80.csv
-data/raw/orange/churn-bigml-20.csv
+uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Liveness probe — always 200 |
+| `/ready` | GET | Readiness probe — 503 until model loaded |
+| `/info` | GET | Model name, CV AUC, feature count |
+| `/predict` | POST | Batch churn scoring (1–10 000 subscribers) |
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subscribers": [{
+      "REGION": "DAKAR", "TENURE": "K > 24 month", "MRG": "NO",
+      "REGULARITY": 54.0, "ON_NET": 388.0, "REVENUE": 4251.0
+    }],
+    "threshold": 0.5
+  }'
+```
+
+Interactive docs: `http://localhost:8000/docs`
+
+---
+
+## Docker
+
+```bash
+docker compose up --build      # build and start
+docker compose up              # start with cached image
+
+# Manual run
+docker run -p 8000:8000 \
+  -v ./models:/app/models:ro \
+  -v ./data/features:/app/data/features:ro \
+  -e API_WORKERS=4 \
+  expresso-churn-api:latest
+```
+
+Model artifacts are **mounted at runtime**, not baked into the image — swap `models/best_model.pkl` without rebuilding.
+
+---
+
+## Feature Engineering
+
+`FeaturePipeline` chains 9 sklearn-compatible transformers (fit on train, applied to both splits):
+
+```
+Raw (19 cols)
+  → MissingIndicatorAdder     {col}_missing flags  (14 cols)
+  → ServiceAbsenceEncoder     n_services_absent, is_ghost_subscriber
+  → ZeroImputer               MNAR usage cols → 0
+  → MedianImputer             MAR financial cols → training median
+  → NumericFeatureEngineer    regularity_rate, recharge_per_freq, total_calls, …
+  → TenureEncoder             tenure_ordinal + is_new_subscriber
+  → MRGEncoder                YES/NO → mrg_flag
+  → TargetEncoder(REGION)     James–Stein smoothed → REGION_te
+  → TopPackEncoder            rare collapsing + freq + target encode
+  → get_model_features()      drops IDs + raw categoricals + ARPU_SEGMENT duplicate
+44 features, zero nulls
+```
+
+Full rationale: [`docs/PROJECT.md`](docs/PROJECT.md) § Feature Engineering.
 
 ---
 
 ## Development
 
-### Commands
-
 ```bash
-# Run all tests (17 tests)
-pytest
+pytest                              # 46 tests
+pytest tests/test_features.py -v   # feature tests only
+pytest tests/test_models.py -v     # model utility tests
+pytest tests/test_api.py -v        # API endpoint tests
 
-# Run a single test
-pytest tests/test_features.py::test_pipeline_fit_transform
+ruff check src/ tests/             # lint
+mypy src/                          # type check
 
-# Lint
-ruff check src/ tests/
-
-# Type-check
-mypy src/
-
-# Feature engineering pipeline
-python -m src.features.run_pipeline
-
-# MLflow UI
-mlflow ui --backend-store-uri mlruns
+mlflow ui --backend-store-uri mlruns   # experiment tracker → :5000
 ```
 
-### Code style
+### Code conventions
 
-- Line length 100, ruff rules: `E, F, I, N, UP, ANN` (ANN101/ANN102 ignored)
-- Strict mypy — all functions need full type annotations
-- Python 3.11+ syntax (`list[str]` not `List[str]`, `X | Y` unions)
-- Never commit raw data; track via DVC
+- Line length 100; ruff rules `E, F, I, N, UP, ANN`
+- Strict mypy — all functions fully typed, Python 3.11+ syntax
+- Never commit raw data or model artifacts — track via DVC
 - Strip notebook outputs before committing
 
-### Config
+---
 
-All paths, hyperparameters, and service settings live in `configs/base.yaml`. Load with PyYAML at pipeline entry points rather than hardcoding values.
+## Datasets
 
-```python
-import yaml
-from pathlib import Path
+| Dataset | Role | Rows | Churn rate |
+|---------|------|------|-----------|
+| Expresso Telecom (Senegal) | Primary — training + evaluation | 2,154,048 | 18.75% |
+| Cell2Cell Wireless (USA) | Reference EDA only | 51,047 | 28.82% |
+| Orange Telecom (USA) | Reference EDA only | 2,666 | 14.55% |
 
-with open(Path(__file__).parents[2] / "configs" / "base.yaml") as f:
-    cfg = yaml.safe_load(f)
-```
+Sources: [Zindi Expresso Challenge](https://zindi.africa/competitions/expresso-churn-prediction) · [Kaggle Cell2Cell](https://www.kaggle.com/datasets/jpacse/datasets-for-churn-telecom) · [Kaggle Orange](https://www.kaggle.com/datasets/mnassrib/telecom-churn-datasets)
 
 ---
 
-## MLflow Experiment Tracking
-
-```bash
-mlflow ui --backend-store-uri mlruns
-# → http://localhost:5000
-```
-
-- Experiment name: `moroccan_prepaid_churn`
-- Tracking URI: `mlruns/` (local, gitignored)
-- Runs logged: one per `run_pipeline.py` execution, with params, metrics, and artifacts
-
----
-
-## Notebooks
-
-| Notebook | Purpose | Status |
-|----------|---------|--------|
-| [01_eda.ipynb](notebooks/01_eda.ipynb) | Expresso EDA — distributions, missingness (MNAR/MAR analysis), correlations, feature importance baseline | Executed |
-| [02_eda_cell2cell.ipynb](notebooks/02_eda_cell2cell.ipynb) | Cell2Cell reference EDA — tenure, customer care calls deep-dive, retention signals | Executed |
-| [03_eda_orange.ipynb](notebooks/03_eda_orange.ipynb) | Orange Telecom reference EDA — international plan, customer service calls, charge/minutes collinearity | Executed |
-| [04_cross_dataset_analysis.ipynb](notebooks/04_cross_dataset_analysis.ipynb) | Cross-dataset robustness — feature ontology mapping, Spearman ρ heatmap, DT importance, priority table | Executed |
-| [05_feature_engineering.ipynb](notebooks/05_feature_engineering.ipynb) | Feature engineering — EDA-to-feature decision table, step-by-step pipeline walkthrough, signal comparison, leakage check, feature manifest | Executed |
+For a full technical and functional walkthrough, see [`docs/PROJECT.md`](docs/PROJECT.md).
