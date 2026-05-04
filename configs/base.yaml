@@ -51,7 +51,10 @@ logistic_regression:
 
 mlflow:
   experiment_name: moroccan_prepaid_churn
-  tracking_uri: mlruns
+  # SQLite backend — avoids file-store deprecation warning (removed Feb 2026).
+  # Previous runs stored in mlruns/ remain accessible via:
+  #   mlflow ui --backend-store-uri mlruns
+  tracking_uri: sqlite:///mlruns.db
 
 api:
   host: 0.0.0.0

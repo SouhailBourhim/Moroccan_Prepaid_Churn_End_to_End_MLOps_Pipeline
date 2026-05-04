@@ -1,21 +1,26 @@
 """Standalone holdout evaluation script for the DVC pipeline.
 
 Loads the trained model and a stratified holdout split of the training
-features, computes key metrics, and writes them to models/eval_metrics.json
-so DVC can track and diff them across pipeline runs.
+features, computes key metrics, writes them to models/eval_metrics.json
+(DVC metric), and logs them to MLflow for cross-run comparison.
 
 Usage:
     python -m src.models.evaluate_run
+    python -m src.models.evaluate_run --no-mlflow
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import joblib
+import mlflow
 import numpy as np
 import pandas as pd
+import yaml
 from loguru import logger
 from sklearn.model_selection import train_test_split
 
@@ -25,13 +30,20 @@ from src.utils.logging import setup_logger
 ROOT = Path(__file__).parents[2]
 FEATURES_DIR = ROOT / "data" / "features"
 MODELS_DIR = ROOT / "models"
+CONFIG_PATH = ROOT / "configs" / "base.yaml"
 
 HOLDOUT_SIZE = 0.20
 RANDOM_STATE = 42
 
 
-def run() -> dict[str, float]:
+def _load_config(path: Path) -> dict[str, Any]:
+    with open(path) as fh:
+        return yaml.safe_load(fh)  # type: ignore[no-any-return]
+
+
+def run(use_mlflow: bool = True) -> dict[str, float]:
     setup_logger()
+    cfg = _load_config(CONFIG_PATH)
 
     # ── Load features ─────────────────────────────────────────────────────────
     df = pd.read_parquet(FEATURES_DIR / "train_features.parquet")
@@ -110,8 +122,41 @@ def run() -> dict[str, float]:
         f"R={metrics['recall_youden']:.3f}"
     )
     logger.info(f"Metrics saved → {out}")
+
+    # ── MLflow ────────────────────────────────────────────────────────────────
+    if use_mlflow:
+        mlflow_cfg = cfg.get("mlflow", {})
+        tracking_uri = str(mlflow_cfg.get("tracking_uri", "mlruns"))
+        resolved_uri = (
+            tracking_uri
+            if "://" in tracking_uri or os.path.isabs(tracking_uri)
+            else str(ROOT / tracking_uri)
+        )
+        mlflow.set_tracking_uri(resolved_uri)
+        mlflow.set_experiment(mlflow_cfg.get("experiment_name", "moroccan_prepaid_churn"))
+
+        with mlflow.start_run(run_name="evaluate"):
+            mlflow.log_param("holdout_size", len(y_val))
+            mlflow.log_param("n_features", len(saved_cols))
+            mlflow.log_param("model_name", artifact.get("model", "unknown").__class__.__name__)
+            for key, val in metrics.items():
+                if key not in ("holdout_size", "churn_rate"):
+                    mlflow.log_metric(key, val)
+            mlflow.log_artifact(str(out), "evaluation")
+
+            run = mlflow.active_run()
+            if run is not None:
+                logger.info(f"MLflow run: {run.info.run_id}")
+
     return metrics
 
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--no-mlflow", dest="use_mlflow", action="store_false")
+    return p.parse_args()
+
+
 if __name__ == "__main__":
-    run()
+    args = _parse_args()
+    run(use_mlflow=args.use_mlflow)
