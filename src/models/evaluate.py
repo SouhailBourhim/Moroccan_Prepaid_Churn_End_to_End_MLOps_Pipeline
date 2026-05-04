@@ -127,7 +127,7 @@ def threshold_at_recall(
     if not mask.any():
         # Recall floor is unattainable at any threshold — return the lowest
         # threshold to maximise recall (predict as many positives as possible).
-        return float(thresholds[-1])
+        return float(thresholds[0])
     return float(thresholds[mask][-1])
 
 

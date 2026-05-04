@@ -45,7 +45,13 @@ def run() -> dict[str, float]:
     saved_cols: list[str] = artifact["feature_cols"]
 
     # Align columns in case pipeline produced a different order
-    col_idx = [feature_cols.index(c) for c in saved_cols if c in feature_cols]
+    missing_cols = [c for c in saved_cols if c not in feature_cols]
+    if missing_cols:
+        raise RuntimeError(
+            "Saved model feature columns are missing from train_features.parquet: "
+            f"{missing_cols}. Regenerate features and retrain the model."
+        )
+    col_idx = [feature_cols.index(c) for c in saved_cols]
     X = X[:, col_idx]
 
     # ── Holdout split (deterministic) ─────────────────────────────────────────
