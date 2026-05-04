@@ -26,7 +26,13 @@ dvc repro
 uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
 # → http://localhost:8000/docs
 
-# 5. Or run via Docker
+# 5. Start the React dashboard
+cd dashboard
+npm install
+npm run dev
+# → http://localhost:5173
+
+# 6. Or run the API via Docker
 docker compose up --build
 ```
 
@@ -45,10 +51,11 @@ docker compose up --build
 | Hyperparameter tuning (Optuna) | ✅ Done | `src/models/tune.py` |
 | Model evaluation | ✅ Done | `notebooks/06_model_evaluation.ipynb`, `models/eval_metrics.json` |
 | FastAPI serving endpoint | ✅ Done | `src/api/`, port 8000 |
+| React operations dashboard | ✅ Done | `dashboard/`, port 5173 |
 | Docker containerisation | ✅ Done | `Dockerfile`, `docker-compose.yml` |
 | DVC reproducible pipeline | ✅ Done | `dvc.yaml` (featurize → train → evaluate) |
 | CI/CD | ✅ Done | `.github/workflows/ci.yml` |
-| Drift monitoring | 🔜 Next | — |
+| Production monitoring loop | 🔜 Next | prediction logging, drift checks, feedback labels |
 
 ---
 
@@ -94,6 +101,9 @@ notebooks/
 docs/
   adr/001-model-selection.md   ← why CatBoost + XGBoost + LightGBM + LR
   PROJECT.md                   ← full technical + functional documentation
+
+dashboard/                     ← Vite React dashboard for model ops
+  src/                         ← KPI tiles, charts, feature signals, scoring panel
 
 Dockerfile                     ← multi-stage build (3.3 GB; catboost is the floor)
 docker-compose.yml             ← mounts models/ and data/features/ as volumes
@@ -183,6 +193,33 @@ Interactive docs: `http://localhost:8000/docs`
 
 ---
 
+## Dashboard
+
+The React dashboard in `dashboard/` gives a local operations view over the project:
+
+- model KPI tiles for best model, CV ROC-AUC, CV PR-AUC, and feature count
+- candidate model comparison chart
+- threshold tradeoff chart for precision, recall, and F1
+- high-signal feature list for engineered churn indicators
+- example subscriber scoring panel connected to the FastAPI `/predict` endpoint
+- DVC stage flow showing the current reproducible pipeline
+
+```bash
+cd dashboard
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. By default the dashboard calls `http://localhost:8000`; set `VITE_CHURN_API_URL` to point it at another API deployment.
+
+```bash
+VITE_CHURN_API_URL=https://your-api.example.com npm run dev
+```
+
+If the API is offline, the dashboard falls back to saved project metrics so the UI remains usable for demos and documentation.
+
+---
+
 ## Docker
 
 ```bash
@@ -217,7 +254,7 @@ Raw (19 cols)
   → TargetEncoder(REGION)     James–Stein smoothed → REGION_te
   → TopPackEncoder            rare collapsing + freq + target encode
   → get_model_features()      drops IDs + raw categoricals + ARPU_SEGMENT duplicate
-44 features, zero nulls
+38 model features after redundant-feature pruning, zero nulls
 ```
 
 Full rationale: [`docs/PROJECT.md`](docs/PROJECT.md) § Feature Engineering.
@@ -227,13 +264,16 @@ Full rationale: [`docs/PROJECT.md`](docs/PROJECT.md) § Feature Engineering.
 ## Development
 
 ```bash
-pytest                              # 46 tests
+pytest                              # 48 tests
 pytest tests/test_features.py -v   # feature tests only
 pytest tests/test_models.py -v     # model utility tests
 pytest tests/test_api.py -v        # API endpoint tests
 
 ruff check src/ tests/             # lint
 mypy src/                          # type check
+
+cd dashboard && npm run lint        # dashboard lint
+cd dashboard && npm run build       # dashboard production build
 
 mlflow ui --backend-store-uri mlruns   # experiment tracker → :5000
 ```
@@ -256,6 +296,21 @@ mlflow ui --backend-store-uri mlruns   # experiment tracker → :5000
 | Orange Telecom (USA) | Reference EDA only | 2,666 | 14.55% |
 
 Sources: [Zindi Expresso Challenge](https://zindi.africa/competitions/expresso-churn-prediction) · [Kaggle Cell2Cell](https://www.kaggle.com/datasets/jpacse/datasets-for-churn-telecom) · [Kaggle Orange](https://www.kaggle.com/datasets/mnassrib/telecom-churn-datasets)
+
+---
+
+## What's Next
+
+The next production milestone is the monitoring and feedback loop:
+
+1. Log prediction requests, scores, latency, model version, and timestamps.
+2. Compare live feature distributions against the training baseline for drift.
+3. Join future ground-truth churn labels back to stored predictions.
+4. Trigger retraining when drift or performance degradation crosses a threshold.
+5. Promote model versions through MLflow registry with rollback support.
+6. Surface drift, traffic, and prediction distribution in the React dashboard.
+
+After that, harden deployment with API auth, rate limiting, CORS controls, container scanning, and a real cloud deployment target.
 
 ---
 
