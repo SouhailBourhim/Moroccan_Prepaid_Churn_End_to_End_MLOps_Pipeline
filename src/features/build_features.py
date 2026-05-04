@@ -232,7 +232,8 @@ class NumericFeatureEngineer(BaseEstimator, TransformerMixin):
         X["n_active_call_types"] = (X[CALL_COLS] > 0).sum(axis=1).astype("int8")
 
         # Binary activity flags
-        X["is_inactive"] = (X["REGULARITY"] < self.inactive_threshold).astype("int8")
+        inactive_threshold = getattr(self, "inactive_threshold", 5.0)
+        X["is_inactive"] = (X["REGULARITY"] < inactive_threshold).astype("int8")
         X["has_data"] = (X["DATA_VOLUME"] > 0).astype("int8")
         X["has_calls"] = (X["total_calls"] > 0).astype("int8")
         X["has_intl_usage"] = (X["intl_calls"] > 0).astype("int8")
