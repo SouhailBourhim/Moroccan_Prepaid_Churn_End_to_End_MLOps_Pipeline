@@ -27,6 +27,7 @@ data/interim/
 
 # MLflow
 mlruns/
+mlruns.db
 mlartifacts/
 
 # Notebooks – strip outputs before commit
