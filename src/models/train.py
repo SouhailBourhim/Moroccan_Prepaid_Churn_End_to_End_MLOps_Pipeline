@@ -65,6 +65,7 @@ class Candidate:
     name: str
     model: Any
     params: dict[str, Any] = field(default_factory=dict)
+    early_stopping_rounds: int = 0  # 0 = disabled; tree models set this to 50
 
 
 @dataclass
@@ -121,12 +122,14 @@ def build_candidates(cfg: dict[str, Any], scale_pos_weight: float) -> list[Candi
                 reg_alpha=float(xgb["reg_alpha"]),
                 reg_lambda=float(xgb["reg_lambda"]),
                 scale_pos_weight=round(scale_pos_weight, 3),
+                early_stopping_rounds=int(cfg["training"].get("early_stopping_rounds", 50)),
                 eval_metric="auc",
                 random_state=rs,
                 n_jobs=-1,
                 verbosity=0,
             ),
             params={**xgb, "scale_pos_weight": round(scale_pos_weight, 3)},
+            early_stopping_rounds=int(cfg["training"].get("early_stopping_rounds", 50)),
         ),
         Candidate(
             name="lightgbm",
@@ -146,6 +149,7 @@ def build_candidates(cfg: dict[str, Any], scale_pos_weight: float) -> list[Candi
                 verbosity=-1,
             ),
             params={**lgb, "is_unbalance": True},
+            early_stopping_rounds=int(cfg["training"].get("early_stopping_rounds", 50)),
         ),
         Candidate(
             name="catboost",
@@ -158,16 +162,52 @@ def build_candidates(cfg: dict[str, Any], scale_pos_weight: float) -> list[Candi
                 colsample_bylevel=float(cb.get("colsample_bylevel", 0.8)),
                 min_data_in_leaf=int(cb.get("min_data_in_leaf", 50)),
                 auto_class_weights="Balanced",
+                early_stopping_rounds=int(cfg["training"].get("early_stopping_rounds", 50)),
                 random_seed=rs,
                 verbose=0,
                 allow_writing_files=False,
             ),
             params={**cb, "auto_class_weights": "Balanced"},
+            early_stopping_rounds=int(cfg["training"].get("early_stopping_rounds", 50)),
         ),
     ]
 
 
 # ── Cross-validation ───────────────────────────────────────────────────────────
+
+
+def _fit(
+    model: Any,
+    X_tr: np.ndarray,
+    y_tr: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    early_stopping_rounds: int,
+) -> None:
+    """Fit a model, passing eval_set for tree models that support early stopping.
+
+    Each library has a different API:
+      XGBoost    — early_stopping_rounds set in constructor; needs eval_set in fit()
+      LightGBM   — early stopping via callbacks passed to fit()
+      CatBoost   — early_stopping_rounds set in constructor; needs eval_set in fit()
+      LR Pipeline — no early stopping; plain fit()
+    """
+    if early_stopping_rounds > 0 and isinstance(model, XGBClassifier):
+        model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+    elif early_stopping_rounds > 0 and isinstance(model, LGBMClassifier):
+        import lightgbm as lgb  # local import avoids top-level lgb namespace clash
+        model.fit(
+            X_tr, y_tr,
+            eval_set=[(X_val, y_val)],
+            callbacks=[
+                lgb.early_stopping(early_stopping_rounds, verbose=False),
+                lgb.log_evaluation(-1),
+            ],
+        )
+    elif early_stopping_rounds > 0 and isinstance(model, CatBoostClassifier):
+        model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
+    else:
+        model.fit(X_tr, y_tr)
 
 
 def _cv_score(
@@ -186,7 +226,7 @@ def _cv_score(
         y_tr, y_val = y[train_idx], y[val_idx]
 
         model = clone(candidate.model)
-        model.fit(X_tr, y_tr)
+        _fit(model, X_tr, y_tr, X_val, y_val, candidate.early_stopping_rounds)
         y_prob: np.ndarray = model.predict_proba(X_val)[:, 1]
 
         fold_roc = float(roc_auc_score(y_val, y_prob))
