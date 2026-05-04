@@ -657,7 +657,7 @@ The project now includes a Vite React dashboard in `dashboard/` for local model-
 - **Candidate comparison:** ROC-AUC leaderboard for CatBoost, XGBoost, LightGBM, and Logistic Regression.
 - **Threshold analysis:** precision, recall, and F1 tradeoff across default, Youden-J, and F1-optimal thresholds.
 - **Feature signals:** high-signal engineered features such as `regularity_rate`, `n_services_absent`, `is_ghost_subscriber`, `REGION_te`, and `top_pack_te`.
-- **Live scoring panel:** example subscriber request sent to the FastAPI `/predict` endpoint.
+- **Live scoring panel:** editable raw subscriber inputs, score-current action, batch queue, and batch prediction results sent to the FastAPI `/predict` endpoint.
 - **Pipeline view:** DVC stage flow from raw validation through serving.
 
 ### 12.2 Running Locally

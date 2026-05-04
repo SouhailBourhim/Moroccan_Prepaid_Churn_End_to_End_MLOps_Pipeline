@@ -201,7 +201,7 @@ The React dashboard in `dashboard/` gives a local operations view over the proje
 - candidate model comparison chart
 - threshold tradeoff chart for precision, recall, and F1
 - high-signal feature list for engineered churn indicators
-- example subscriber scoring panel connected to the FastAPI `/predict` endpoint
+- editable subscriber scoring panel with score-current, batch queue, and batch results
 - DVC stage flow showing the current reproducible pipeline
 
 ```bash

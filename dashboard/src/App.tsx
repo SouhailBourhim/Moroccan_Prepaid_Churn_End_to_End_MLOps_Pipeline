@@ -7,11 +7,14 @@ import {
   GitBranch,
   LineChart,
   Play,
+  Plus,
   RadioTower,
   RefreshCcw,
+  RotateCcw,
   Server,
   ShieldCheck,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Trash2
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -33,7 +36,7 @@ import {
   pipelineStages,
   thresholdProfiles
 } from "./data";
-import type { ApiInfo, PredictionResponse, ReadyState } from "./types";
+import type { ApiInfo, PredictionResponse, ReadyState, SubscriberInput } from "./types";
 
 const fallbackInfo: ApiInfo = {
   model_name: "catboost",
@@ -45,13 +48,86 @@ const fallbackInfo: ApiInfo = {
 
 const apiBase = import.meta.env.VITE_CHURN_API_URL ?? "http://localhost:8000";
 
+const categoricalFields = [
+  { key: "REGION", label: "Region", options: ["DAKAR", "THIES", "SAINT-LOUIS", "LOUGA", "KAOLACK", "DIOURBEL"] },
+  { key: "TENURE", label: "Tenure", options: ["K > 24 month", "J 21-24 month", "I 18-21 month", "H 15-18 month", "G 12-15 month", "F 9-12 month", "E 6-9 month", "D 3-6 month"] },
+  { key: "MRG", label: "MRG", options: ["NO", "YES"] },
+  { key: "TOP_PACK", label: "Top pack", options: ["On net 200F=Unlimited _call24H", "Data:1000F=2GB,30d", "Data:200F=Unlimited,24H", "All-net 500F=2000F;5d", ""] }
+] as const;
+
+const numericFields = [
+  ["MONTANT", "Recharge amount"],
+  ["FREQUENCE_RECH", "Recharge frequency"],
+  ["REVENUE", "Revenue"],
+  ["ARPU_SEGMENT", "ARPU segment"],
+  ["FREQUENCE", "Transactions"],
+  ["DATA_VOLUME", "Data volume"],
+  ["ON_NET", "On-net calls"],
+  ["ORANGE", "Orange calls"],
+  ["TIGO", "Tigo calls"],
+  ["ZONE1", "Zone 1 calls"],
+  ["ZONE2", "Zone 2 calls"],
+  ["REGULARITY", "Regularity"],
+  ["FREQ_TOP_PACK", "Top pack frequency"]
+] as const;
+
 const formatPct = (value: number, digits = 1) => `${(value * 100).toFixed(digits)}%`;
 const formatMetric = (value: number) => value.toFixed(4);
+
+const emptyToNull = (value: string) => {
+  if (value.trim() === "") {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
+
+const createEditableSubscriber = (): SubscriberInput => ({
+  REGION: defaultSubscriber.REGION,
+  TENURE: defaultSubscriber.TENURE,
+  MRG: defaultSubscriber.MRG,
+  TOP_PACK: defaultSubscriber.TOP_PACK,
+  MONTANT: String(defaultSubscriber.MONTANT),
+  FREQUENCE_RECH: String(defaultSubscriber.FREQUENCE_RECH),
+  REVENUE: String(defaultSubscriber.REVENUE),
+  ARPU_SEGMENT: String(defaultSubscriber.ARPU_SEGMENT),
+  FREQUENCE: String(defaultSubscriber.FREQUENCE),
+  DATA_VOLUME: String(defaultSubscriber.DATA_VOLUME),
+  ON_NET: String(defaultSubscriber.ON_NET),
+  ORANGE: String(defaultSubscriber.ORANGE),
+  TIGO: String(defaultSubscriber.TIGO),
+  ZONE1: String(defaultSubscriber.ZONE1),
+  ZONE2: String(defaultSubscriber.ZONE2),
+  REGULARITY: String(defaultSubscriber.REGULARITY),
+  FREQ_TOP_PACK: String(defaultSubscriber.FREQ_TOP_PACK)
+});
+
+const toApiSubscriber = (subscriber: SubscriberInput) => ({
+  REGION: subscriber.REGION || null,
+  TENURE: subscriber.TENURE || null,
+  MRG: subscriber.MRG || null,
+  TOP_PACK: subscriber.TOP_PACK || null,
+  MONTANT: emptyToNull(subscriber.MONTANT),
+  FREQUENCE_RECH: emptyToNull(subscriber.FREQUENCE_RECH),
+  REVENUE: emptyToNull(subscriber.REVENUE),
+  ARPU_SEGMENT: emptyToNull(subscriber.ARPU_SEGMENT),
+  FREQUENCE: emptyToNull(subscriber.FREQUENCE),
+  DATA_VOLUME: emptyToNull(subscriber.DATA_VOLUME),
+  ON_NET: emptyToNull(subscriber.ON_NET),
+  ORANGE: emptyToNull(subscriber.ORANGE),
+  TIGO: emptyToNull(subscriber.TIGO),
+  ZONE1: emptyToNull(subscriber.ZONE1),
+  ZONE2: emptyToNull(subscriber.ZONE2),
+  REGULARITY: emptyToNull(subscriber.REGULARITY),
+  FREQ_TOP_PACK: emptyToNull(subscriber.FREQ_TOP_PACK)
+});
 
 function App() {
   const [readyState, setReadyState] = useState<ReadyState>("checking");
   const [apiInfo, setApiInfo] = useState<ApiInfo>(fallbackInfo);
   const [threshold, setThreshold] = useState(0.5);
+  const [subscriber, setSubscriber] = useState<SubscriberInput>(() => createEditableSubscriber());
+  const [batch, setBatch] = useState<SubscriberInput[]>([]);
   const [prediction, setPrediction] = useState<PredictionResponse | null>(null);
   const [isScoring, setIsScoring] = useState(false);
   const [apiMessage, setApiMessage] = useState("Using local training metrics");
@@ -67,6 +143,9 @@ function App() {
     recall: Number((profile.recall * 100).toFixed(1)),
     f1: Number((profile.f1 * 100).toFixed(1))
   }));
+
+  const scoreRows = batch.length ? batch : [subscriber];
+  const latestProbability = prediction?.predictions[0]?.churn_probability ?? 0.3;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -101,7 +180,30 @@ function App() {
     return () => controller.abort();
   }, []);
 
-  async function scoreExample() {
+  const updateField = (key: keyof SubscriberInput, value: string) => {
+    setSubscriber((current) => ({ ...current, [key]: value }));
+  };
+
+  const addToBatch = () => {
+    setBatch((current) => [...current, { ...subscriber }]);
+    setPrediction(null);
+  };
+
+  const removeFromBatch = (index: number) => {
+    setBatch((current) => current.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  const clearBatch = () => {
+    setBatch([]);
+    setPrediction(null);
+  };
+
+  const resetForm = () => {
+    setSubscriber(createEditableSubscriber());
+    setPrediction(null);
+  };
+
+  async function scoreSubscribers(rows: SubscriberInput[]) {
     setIsScoring(true);
     setPrediction(null);
     try {
@@ -109,7 +211,7 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          subscribers: [defaultSubscriber],
+          subscribers: rows.map(toApiSubscriber),
           threshold
         })
       });
@@ -119,7 +221,7 @@ function App() {
       }
       setPrediction((await response.json()) as PredictionResponse);
       setReadyState("ready");
-      setApiMessage(`Scored with ${apiBase}`);
+      setApiMessage(`Scored ${rows.length} subscriber${rows.length === 1 ? "" : "s"}`);
     } catch {
       setReadyState("offline");
       setApiMessage("Start the FastAPI service to score live subscribers");
@@ -127,8 +229,6 @@ function App() {
       setIsScoring(false);
     }
   }
-
-  const probability = prediction?.predictions[0]?.churn_probability ?? 0.3;
 
   return (
     <main className="app-shell">
@@ -257,12 +357,9 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">Live scoring</p>
-                <h2>Example subscriber</h2>
+                <h2>Subscriber prediction workspace</h2>
               </div>
-              <button className="primary-button" onClick={scoreExample} disabled={isScoring}>
-                <Play aria-hidden="true" />
-                {isScoring ? "Scoring" : "Score"}
-              </button>
+              <span className="tag neutral">{scoreRows.length} ready to score</span>
             </div>
 
             <label className="slider-label" htmlFor="threshold">
@@ -279,29 +376,74 @@ function App() {
               onChange={(event) => setThreshold(Number(event.target.value))}
             />
 
-            <div className="risk-meter" style={{ "--risk": `${probability * 100}%` } as React.CSSProperties}>
+            <div className="input-grid">
+              {categoricalFields.map((field) => (
+                <label className="field-control" key={field.key}>
+                  <span>{field.label}</span>
+                  <select
+                    value={subscriber[field.key]}
+                    onChange={(event) => updateField(field.key, event.target.value)}
+                  >
+                    {field.options.map((option) => (
+                      <option key={option || "empty"} value={option}>
+                        {option || "None"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+
+              {numericFields.map(([key, label]) => (
+                <label className="field-control" key={key}>
+                  <span>{label}</span>
+                  <input
+                    type="number"
+                    min={key === "REGULARITY" ? 0 : undefined}
+                    max={key === "REGULARITY" ? 90 : undefined}
+                    value={subscriber[key]}
+                    onChange={(event) => updateField(key, event.target.value)}
+                  />
+                </label>
+              ))}
+            </div>
+
+            <div className="prediction-actions">
+              <button className="primary-button" onClick={() => scoreSubscribers([subscriber])} disabled={isScoring}>
+                <Play aria-hidden="true" />
+                {isScoring ? "Scoring" : "Score current"}
+              </button>
+              <button className="secondary-button" onClick={addToBatch}>
+                <Plus aria-hidden="true" />
+                Add to batch
+              </button>
+              <button className="secondary-button" onClick={() => scoreSubscribers(scoreRows)} disabled={isScoring}>
+                <Play aria-hidden="true" />
+                Score batch
+              </button>
+              <button className="icon-button" title="Reset input form" onClick={resetForm}>
+                <RotateCcw aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="risk-meter" style={{ "--risk": `${latestProbability * 100}%` } as React.CSSProperties}>
               <div className="risk-fill" />
             </div>
 
             <div className="prediction-summary">
               <div>
-                <span>Churn probability</span>
-                <strong>{formatPct(probability)}</strong>
+                <span>Latest probability</span>
+                <strong>{formatPct(latestProbability)}</strong>
               </div>
               <div>
-                <span>Decision</span>
-                <strong className={probability >= threshold ? "danger-text" : "safe-text"}>
-                  {probability >= threshold ? "Retain" : "Observe"}
+                <span>Latest decision</span>
+                <strong className={latestProbability >= threshold ? "danger-text" : "safe-text"}>
+                  {latestProbability >= threshold ? "Retain" : "Observe"}
                 </strong>
               </div>
             </div>
 
-            <div className="subscriber-strip">
-              <span>DAKAR</span>
-              <span>K &gt; 24 month</span>
-              <span>REGULARITY 54</span>
-              <span>REVENUE 4251</span>
-            </div>
+            <BatchQueue batch={batch} onRemove={removeFromBatch} onClear={clearBatch} />
+            <PredictionResults response={prediction} rows={scoreRows} />
           </div>
         </section>
 
@@ -325,6 +467,92 @@ function App() {
         </section>
       </section>
     </main>
+  );
+}
+
+type BatchQueueProps = {
+  batch: SubscriberInput[];
+  onRemove: (index: number) => void;
+  onClear: () => void;
+};
+
+function BatchQueue({ batch, onRemove, onClear }: BatchQueueProps) {
+  if (!batch.length) {
+    return (
+      <div className="empty-state">
+        Add subscribers to create a batch, or score the current form directly.
+      </div>
+    );
+  }
+
+  return (
+    <div className="batch-box">
+      <div className="batch-heading">
+        <strong>Batch queue</strong>
+        <button className="text-button" onClick={onClear}>Clear</button>
+      </div>
+      <div className="batch-list">
+        {batch.map((item, index) => (
+          <div className="batch-row" key={`${item.REGION}-${item.REGULARITY}-${index}`}>
+            <div>
+              <strong>Subscriber {index + 1}</strong>
+              <small>{item.REGION || "Unknown"} · REGULARITY {item.REGULARITY || "NA"} · REVENUE {item.REVENUE || "NA"}</small>
+            </div>
+            <button className="icon-button compact" title="Remove subscriber" onClick={() => onRemove(index)}>
+              <Trash2 aria-hidden="true" />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type PredictionResultsProps = {
+  response: PredictionResponse | null;
+  rows: SubscriberInput[];
+};
+
+function PredictionResults({ response, rows }: PredictionResultsProps) {
+  if (!response) {
+    return null;
+  }
+
+  return (
+    <div className="results-table-wrap">
+      <div className="batch-heading">
+        <strong>Prediction results</strong>
+        <span>{response.n_subscribers} scored</span>
+      </div>
+      <table className="results-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Region</th>
+            <th>Regularity</th>
+            <th>Revenue</th>
+            <th>Probability</th>
+            <th>Decision</th>
+          </tr>
+        </thead>
+        <tbody>
+          {response.predictions.map((item, index) => (
+            <tr key={`${item.churn_probability}-${index}`}>
+              <td>{index + 1}</td>
+              <td>{rows[index]?.REGION || "NA"}</td>
+              <td>{rows[index]?.REGULARITY || "NA"}</td>
+              <td>{rows[index]?.REVENUE || "NA"}</td>
+              <td>{formatPct(item.churn_probability, 2)}</td>
+              <td>
+                <span className={item.churn_prediction ? "decision-pill retain" : "decision-pill observe"}>
+                  {item.churn_prediction ? "Retain" : "Observe"}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
