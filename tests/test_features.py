@@ -4,18 +4,17 @@ import pandas as pd
 import pytest
 
 from src.features.build_features import (
-    MissingIndicatorAdder,
-    ServiceAbsenceEncoder,
-    ZeroImputer,
-    MedianImputer,
-    NumericFeatureEngineer,
-    TenureEncoder,
-    MRGEncoder,
-    TargetEncoder,
-    TopPackEncoder,
-    FeaturePipeline,
     MNAR_MISSING_FLAGS,
     TENURE_ORDER,
+    FeaturePipeline,
+    MedianImputer,
+    MissingIndicatorAdder,
+    MRGEncoder,
+    NumericFeatureEngineer,
+    ServiceAbsenceEncoder,
+    TargetEncoder,
+    TenureEncoder,
+    ZeroImputer,
 )
 
 
@@ -238,3 +237,25 @@ def test_pipeline_train_test_consistency(sample_df: pd.DataFrame, target: pd.Ser
 
     assert out_train.columns.tolist() == out_test.columns.tolist()
     assert not out_train.isnull().all(axis=None)
+
+
+def test_pipeline_uses_configurable_feature_params(
+    sample_df: pd.DataFrame,
+    target: pd.Series,
+) -> None:
+    pipe = FeaturePipeline(
+        top_pack_min_freq=10,
+        target_enc_smoothing=7.0,
+        regularity_inactive_threshold=20.0,
+    )
+    pipe.fit(sample_df, target)
+
+    steps = dict(pipe._steps)
+    numeric = steps["numeric_fe"]
+    region = steps["region_te"]
+    top_pack = steps["top_pack_enc"]
+
+    assert numeric.inactive_threshold == pytest.approx(20.0)
+    assert region.smoothing == pytest.approx(7.0)
+    assert top_pack.min_freq == 10
+    assert top_pack.smoothing == pytest.approx(7.0)

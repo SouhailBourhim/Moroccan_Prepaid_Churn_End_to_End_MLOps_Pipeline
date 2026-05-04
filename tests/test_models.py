@@ -154,7 +154,7 @@ def test_threshold_at_recall_falls_back_to_lowest_threshold_when_floor_unattaina
     # threshold in the PR curve (maximise recall rather than defaulting to the highest).
     t = threshold_at_recall(y_true, y_prob, min_recall=1.1)
     _prec, _rec, thresholds = precision_recall_curve(y_true, y_prob)
-    assert t == pytest.approx(float(thresholds[-1]))
+    assert t == pytest.approx(float(thresholds[0]))
 
 
 # ── build_candidates ──────────────────────────────────────────────────────────
@@ -208,6 +208,26 @@ def test_build_candidates_params_logged() -> None:
     xgb = next(c for c in candidates if c.name == "xgboost")
     assert "scale_pos_weight" in xgb.params
     assert xgb.params["scale_pos_weight"] == pytest.approx(3.0)
+
+
+def test_fit_final_model_disables_xgboost_early_stopping() -> None:
+    from xgboost import XGBClassifier
+
+    from src.models.train import _fit_final_model
+
+    rng = np.random.default_rng(42)
+    X = rng.normal(size=(40, 4))
+    y = np.array([0] * 20 + [1] * 20)
+    model = XGBClassifier(
+        n_estimators=5,
+        early_stopping_rounds=2,
+        eval_metric="auc",
+        verbosity=0,
+    )
+
+    _fit_final_model(model, X, y)
+
+    assert model.get_params()["early_stopping_rounds"] is None
 
 
 # ── tune: _suggest_params + _patch_config ────────────────────────────────────

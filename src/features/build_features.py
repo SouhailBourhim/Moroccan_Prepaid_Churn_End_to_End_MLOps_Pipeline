@@ -207,6 +207,9 @@ class NumericFeatureEngineer(BaseEstimator, TransformerMixin):
     Transformer is stateless — no train information stored, no leakage risk.
     """
 
+    def __init__(self, inactive_threshold: float = 5.0) -> None:
+        self.inactive_threshold = inactive_threshold
+
     def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> NumericFeatureEngineer:
         return self
 
@@ -229,7 +232,7 @@ class NumericFeatureEngineer(BaseEstimator, TransformerMixin):
         X["n_active_call_types"] = (X[CALL_COLS] > 0).sum(axis=1).astype("int8")
 
         # Binary activity flags
-        X["is_inactive"] = (X["REGULARITY"] < 5).astype("int8")
+        X["is_inactive"] = (X["REGULARITY"] < self.inactive_threshold).astype("int8")
         X["has_data"] = (X["DATA_VOLUME"] > 0).astype("int8")
         X["has_calls"] = (X["total_calls"] > 0).astype("int8")
         X["has_intl_usage"] = (X["intl_calls"] > 0).astype("int8")
@@ -404,7 +407,15 @@ class FeaturePipeline(BaseEstimator, TransformerMixin):
         9. TopPackEncoder         — rare collapsing + freq + target encode
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        top_pack_min_freq: int = 200,
+        target_enc_smoothing: float = 20.0,
+        regularity_inactive_threshold: float = 5.0,
+    ) -> None:
+        self.top_pack_min_freq = top_pack_min_freq
+        self.target_enc_smoothing = target_enc_smoothing
+        self.regularity_inactive_threshold = regularity_inactive_threshold
         self._steps: list[tuple[str, BaseEstimator]] = []
 
     def _build(self) -> None:
@@ -413,11 +424,19 @@ class FeaturePipeline(BaseEstimator, TransformerMixin):
             ("svc_absence", ServiceAbsenceEncoder()),
             ("zero_imp", ZeroImputer()),
             ("median_imp", MedianImputer()),
-            ("numeric_fe", NumericFeatureEngineer()),
+            ("numeric_fe", NumericFeatureEngineer(
+                inactive_threshold=self.regularity_inactive_threshold
+            )),
             ("tenure_enc", TenureEncoder()),
             ("mrg_enc", MRGEncoder()),
-            ("region_te", TargetEncoder(cols=["REGION"])),
-            ("top_pack_enc", TopPackEncoder()),
+            ("region_te", TargetEncoder(
+                cols=["REGION"],
+                smoothing=self.target_enc_smoothing,
+            )),
+            ("top_pack_enc", TopPackEncoder(
+                min_freq=self.top_pack_min_freq,
+                smoothing=self.target_enc_smoothing,
+            )),
         ]
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> FeaturePipeline:
@@ -451,19 +470,37 @@ def get_model_features(df: pd.DataFrame) -> list[str]:
     """Return the final feature list, dropping IDs, raw categoricals, and target.
 
     Dropped columns:
-      user_id        — identifier, not a feature
-      CHURN          — target variable
-      REGION         — replaced by REGION_te (target encoded)
-      TENURE         — replaced by tenure_ordinal + is_new_subscriber
-      MRG            — replaced by mrg_flag
-      TOP_PACK       — replaced by top_pack_freq + top_pack_te
-      ARPU_SEGMENT   — perfectly collinear with REVENUE (ρ = 1.00, notebook 01);
-                       ARPU_SEGMENT_missing is also dropped because it is
-                       identical to REVENUE_missing (same 726k rows).
+      user_id               — identifier, not a feature
+      CHURN                 — target variable
+      REGION                — replaced by REGION_te (target encoded)
+      TENURE                — replaced by tenure_ordinal + is_new_subscriber
+      MRG                   — replaced by mrg_flag
+      TOP_PACK              — replaced by top_pack_freq + top_pack_te
+      ARPU_SEGMENT          — perfectly collinear with REVENUE (ρ = 1.00);
+                              ARPU_SEGMENT_missing is also dropped (≡ REVENUE_missing)
+
+    Redundant features removed after post-engineering correlation audit:
+      REGULARITY            — ρ = 1.00 with regularity_rate (= REGULARITY / 90);
+                              regularity_rate is kept as the normalised [0,1] form
+      is_new_subscriber     — all-zero in dataset; TENURE never has < 2-month bands
+      mrg_flag              — all-zero in dataset; MRG is always NO
+      FREQUENCE_RECH_missing — ρ = 1.00 with MONTANT_missing (always co-missing);
+                              MONTANT_missing is kept
+      FREQUENCE_missing      — ρ = 1.00 with REVENUE_missing; REVENUE_missing kept
+      FREQ_TOP_PACK_missing  — ρ = 1.00 with TOP_PACK_missing; TOP_PACK_missing kept
     """
     drop = {
         "user_id", "CHURN",
         "REGION", "TENURE", "MRG", "TOP_PACK",
         "ARPU_SEGMENT", "ARPU_SEGMENT_missing",
+        # Perfectly collinear with regularity_rate
+        "REGULARITY",
+        # All-zero in Expresso dataset — zero information content
+        "is_new_subscriber",
+        "mrg_flag",
+        # Perfectly correlated missing-flag duplicates
+        "FREQUENCE_RECH_missing",
+        "FREQUENCE_missing",
+        "FREQ_TOP_PACK_missing",
     }
     return [c for c in df.columns if c not in drop]

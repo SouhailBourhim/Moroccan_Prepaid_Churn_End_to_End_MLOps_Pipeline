@@ -100,7 +100,14 @@ def run(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> None:
     X_train = train_raw.drop(columns=["CHURN"])
     y_train = train_raw["CHURN"]
 
-    pipeline = FeaturePipeline()
+    features_cfg = cfg.get("features", {})
+    pipeline = FeaturePipeline(
+        top_pack_min_freq=int(features_cfg.get("top_pack_min_freq", 200)),
+        target_enc_smoothing=float(features_cfg.get("target_enc_smoothing", 20.0)),
+        regularity_inactive_threshold=float(
+            features_cfg.get("regularity_inactive_threshold", 5)
+        ),
+    )
     X_train_fe = pipeline.fit_transform(X_train, y_train)
     fit_seconds = time.perf_counter() - t1
     logger.info(f"Pipeline fit complete ({fit_seconds:.1f}s)")

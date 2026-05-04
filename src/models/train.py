@@ -254,6 +254,15 @@ def _cv_score(
     return result
 
 
+def _fit_final_model(model: Any, X: np.ndarray, y: np.ndarray) -> None:
+    """Fit the selected model on all rows without CV-only early stopping settings."""
+    if isinstance(model, XGBClassifier):
+        # XGBoost requires an eval_set whenever early_stopping_rounds is configured.
+        # The final refit intentionally uses all rows, so disable early stopping here.
+        model.set_params(early_stopping_rounds=None)
+    model.fit(X, y)
+
+
 # ── Main training function ────────────────────────────────────────────────────
 
 
@@ -324,7 +333,7 @@ def train(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> CVResult:
     logger.info(f"Refitting {best.name} on full training set…")
     t0 = time.perf_counter()
     final_model = clone(best_candidate.model)
-    final_model.fit(X, y)
+    _fit_final_model(final_model, X, y)
     logger.info(f"Refit complete ({time.perf_counter() - t0:.1f}s)")
 
     # ── 6. Save artifacts ─────────────────────────────────────────────────────
