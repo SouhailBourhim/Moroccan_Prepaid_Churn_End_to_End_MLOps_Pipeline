@@ -162,11 +162,13 @@ export const shapValues: ShapEntry[] = [
 
 // ── Confusion matrix (threshold=0.5, holdout n=430,810) ──────────────────────
 
+// Counts derived from models/eval_metrics.json:
+// n=430810, churn_rate=0.1875467143, precision_default=0.5365623876, recall_default=0.9234129980
 export const confusionMatrix = {
-  tp: 74557,   // predicted churn, actual churn
-  fn: 6220,    // predicted retain, actual churn
-  fp: 64303,   // predicted churn, actual retain
-  tn: 285730,  // predicted retain, actual retain
+  tp: 74609,   // predicted churn, actual churn
+  fn: 6188,    // predicted retain, actual churn
+  fp: 64441,   // predicted churn, actual retain
+  tn: 285572,  // predicted retain, actual retain
   threshold: 0.5,
 };
 
