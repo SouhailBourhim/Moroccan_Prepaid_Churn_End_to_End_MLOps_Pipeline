@@ -47,6 +47,7 @@ import {
   shapValues,
   thresholdProfiles,
 } from "./data";
+import type { ShapEntry } from "./data";
 import type { ApiInfo, PredictionResponse, ReadyState, SubscriberInput } from "./types";
 
 const fallbackInfo: ApiInfo = {
@@ -131,7 +132,7 @@ const toApiSubscriber = (subscriber: SubscriberInput) => ({
   FREQ_TOP_PACK: emptyToNull(subscriber.FREQ_TOP_PACK),
 });
 
-const shapColor = (direction: string) => {
+const shapColor = (direction: ShapEntry["direction"]) => {
   if (direction === "positive") return "#bd4b3b";
   if (direction === "mixed") return "#537188";
   return "#167a5c";
@@ -159,16 +160,23 @@ function App() {
     f1: Number((profile.f1 * 100).toFixed(1)),
   }));
 
+  const { tp, fn, fp, tn } = confusionMatrix;
+  const actualPos = tp + fn;
+  const actualNeg = fp + tn;
+  const totalSubscribers = tp + fn + fp + tn;
+  const churnRate = actualPos / totalSubscribers;
+  const brierScore = modelResults.find((m) => m.name === "CatBoost")!.brier;
+  const brierBaseline = churnRate * (1 - churnRate);
+  const defaultProfile = thresholdProfiles.find((p) => p.name === "Default")!;
+  const f1OptProfile = thresholdProfiles.find((p) => p.name === "F1 optimal")!;
+  const topRegion = churnByRegion.reduce((max, r) => (r.rate > max.rate ? r : max));
+
   const rocData = rocCurveData.map((d) => ({ ...d, random: d.fpr }));
-  const prData = prCurveData.map((d) => ({ ...d, baseline: 0.1875 }));
+  const prData = prCurveData.map((d) => ({ ...d, baseline: churnRate }));
   const calibData = calibrationData.map((d) => ({ ...d, perfect: d.predicted }));
 
   const scoreRows = batch.length ? batch : [subscriber];
   const latestProbability = prediction?.predictions[0]?.churn_probability ?? 0.3;
-
-  const { tp, fn, fp, tn } = confusionMatrix;
-  const actualPos = tp + fn;
-  const actualNeg = fp + tn;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -300,10 +308,10 @@ function App() {
 
         {/* ── Holdout KPIs ── */}
         <section className="metric-grid holdout-row" aria-label="Holdout metrics">
-          <MetricTile icon={<Target />} label="Brier score" value="0.1119" detail="lower is better, baseline 0.153" tone="blue" />
-          <MetricTile icon={<Activity />} label="Churn rate" value="18.75%" detail="430,810 subscribers holdout" tone="amber" />
-          <MetricTile icon={<TrendingUp />} label="Recall @ 0.5" value="92.3%" detail="catches 9 in 10 churners" tone="green" />
-          <MetricTile icon={<ShieldCheck />} label="Precision @ 0.5" value="53.7%" detail="F1-optimal threshold: 0.689" tone="slate" />
+          <MetricTile icon={<Target />} label="Brier score" value={brierScore.toFixed(4)} detail={`lower is better, baseline ${brierBaseline.toFixed(3)}`} tone="blue" />
+          <MetricTile icon={<Activity />} label="Churn rate" value={`${(churnRate * 100).toFixed(2)}%`} detail={`${totalSubscribers.toLocaleString()} subscribers holdout`} tone="amber" />
+          <MetricTile icon={<TrendingUp />} label="Recall @ 0.5" value={`${(defaultProfile.recall * 100).toFixed(1)}%`} detail="catches 9 in 10 churners" tone="green" />
+          <MetricTile icon={<ShieldCheck />} label="Precision @ 0.5" value={`${(defaultProfile.precision * 100).toFixed(1)}%`} detail={`F1-optimal threshold: ${f1OptProfile.threshold.toFixed(3)}`} tone="slate" />
         </section>
 
         {/* ── Model leaderboard + Threshold profiles ── */}
@@ -444,7 +452,7 @@ function App() {
               <span className="tag neutral">Holdout</span>
             </div>
             <p className="panel-description">
-              Precision-Recall area (average precision) is preferred over ROC when positives are rare. Dashed baseline is the churn prevalence (18.75%).
+              Precision-Recall area (average precision) is preferred over ROC when positives are rare. Dashed baseline is the churn prevalence ({`${(churnRate * 100).toFixed(2)}%`}).
             </p>
             <div className="chart-frame">
               <ResponsiveContainer width="100%" height={260}>
@@ -472,7 +480,7 @@ function App() {
                     labelFormatter={(label: number) => `Recall: ${Number(label).toFixed(3)}`}
                   />
                   <Line type="monotone" dataKey="precision" stroke="#0f6b8f" strokeWidth={2.5} dot={false} name="CatBoost (AP=0.707)" />
-                  <Line type="monotone" dataKey="baseline" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="6 4" dot={false} name="Baseline (18.75%)" />
+                  <Line type="monotone" dataKey="baseline" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="6 4" dot={false} name={`Baseline (${(churnRate * 100).toFixed(2)}%)`} />
                   <Legend verticalAlign="top" height={28} />
                 </ReLineChart>
               </ResponsiveContainer>
@@ -538,10 +546,10 @@ function App() {
           <div className="panel">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">Decision quality at threshold 0.5</p>
+                <p className="eyebrow">{`Decision quality at threshold ${confusionMatrix.threshold.toFixed(1)}`}</p>
                 <h2>Confusion matrix</h2>
               </div>
-              <span className="tag neutral">n = 430,810</span>
+              <span className="tag neutral">{`n = ${totalSubscribers.toLocaleString()}`}</span>
             </div>
             <p className="panel-description">
               How the model's binary predictions compare to ground-truth churn labels on the holdout set.
@@ -585,7 +593,7 @@ function App() {
               <div><span>Precision</span><strong>{((tp / (tp + fp)) * 100).toFixed(1)}%</strong></div>
               <div><span>Recall</span><strong>{((tp / actualPos) * 100).toFixed(1)}%</strong></div>
               <div><span>Specificity</span><strong>{((tn / actualNeg) * 100).toFixed(1)}%</strong></div>
-              <div><span>F1 Score</span><strong>67.9%</strong></div>
+              <div><span>F1 Score</span><strong>{`${(defaultProfile.f1 * 100).toFixed(1)}%`}</strong></div>
             </div>
           </div>
 
@@ -593,7 +601,7 @@ function App() {
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">Probability reliability</p>
-                <h2>Calibration curve — Brier 0.1119</h2>
+                <h2>{`Calibration curve — Brier ${brierScore.toFixed(4)}`}</h2>
               </div>
               <span className="tag neutral">Holdout</span>
             </div>
@@ -632,7 +640,7 @@ function App() {
               </ResponsiveContainer>
             </div>
             <div className="calib-note">
-              Brier score measures mean squared error of probability predictions. Lower is better; random guessing at the 18.75% churn rate gives 0.153.
+              {`Brier score measures mean squared error of probability predictions. Lower is better; random guessing at the ${(churnRate * 100).toFixed(2)}% churn rate gives ${brierBaseline.toFixed(3)}.`}
             </div>
           </div>
         </section>
@@ -648,7 +656,7 @@ function App() {
               <span className="tag neutral">Train set</span>
             </div>
             <p className="panel-description">
-              Dakar shows the highest churn rate (22.1%), likely due to greater competition and higher subscriber mobility in the capital.
+              {`${topRegion.region} shows the highest churn rate (${topRegion.rate.toFixed(1)}%), likely due to greater competition and higher subscriber mobility in the capital.`}
             </p>
             <div className="chart-frame">
               <ResponsiveContainer width="100%" height={240}>
@@ -659,7 +667,7 @@ function App() {
                   <Tooltip formatter={(value: number) => `${value.toFixed(1)}%`} />
                   <Bar dataKey="rate" name="Churn rate" radius={[5, 5, 0, 0]}>
                     {churnByRegion.map((entry) => (
-                      <Cell key={entry.region} fill={entry.rate > 18.75 ? "#bd4b3b" : "#167a5c"} />
+                      <Cell key={entry.region} fill={entry.rate > churnRate * 100 ? "#bd4b3b" : "#167a5c"} />
                     ))}
                   </Bar>
                 </BarChart>
@@ -667,7 +675,7 @@ function App() {
             </div>
             <div className="geo-note">
               <span className="geo-dot above" />
-              <small>Above overall avg (18.75%)</small>
+              <small>{`Above overall avg (${(churnRate * 100).toFixed(2)}%)`}</small>
               <span className="geo-dot below" />
               <small>Below overall avg</small>
             </div>
@@ -681,7 +689,7 @@ function App() {
               </div>
             </div>
             <p className="panel-description">
-              Expresso Telecom — Senegal's mobile subscriber base. Class imbalance (~82% retained vs ~18% churned) is handled via scale_pos_weight in tree models and James-Stein encoding for categorical features.
+              {`Expresso Telecom — Senegal's mobile subscriber base. Class imbalance (~${((1 - churnRate) * 100).toFixed(0)}% retained vs ~${(churnRate * 100).toFixed(0)}% churned) is handled via scale_pos_weight in tree models and James-Stein encoding for categorical features.`}
             </p>
             <div className="dataset-stats">
               <div className="stat-row">
@@ -694,11 +702,11 @@ function App() {
               </div>
               <div className="stat-row">
                 <span>Holdout set (20%)</span>
-                <strong>430,810</strong>
+                <strong>{totalSubscribers.toLocaleString()}</strong>
               </div>
               <div className="stat-row">
                 <span>Positive class (churn)</span>
-                <strong className="danger-text">18.75%</strong>
+                <strong className="danger-text">{`${(churnRate * 100).toFixed(2)}%`}</strong>
               </div>
               <div className="stat-row">
                 <span>Engineered features</span>
@@ -712,15 +720,15 @@ function App() {
             <div className="class-bar-wrap">
               <div className="class-bar-label">
                 <span>Retained</span>
-                <strong>81.25%</strong>
+                <strong>{`${((1 - churnRate) * 100).toFixed(2)}%`}</strong>
               </div>
               <div className="class-bar">
-                <div className="class-bar-fill retained" style={{ width: "81.25%" }} />
-                <div className="class-bar-fill churned" style={{ width: "18.75%" }} />
+                <div className="class-bar-fill retained" style={{ width: `${(1 - churnRate) * 100}%` }} />
+                <div className="class-bar-fill churned" style={{ width: `${churnRate * 100}%` }} />
               </div>
               <div className="class-bar-label">
                 <span>Churned</span>
-                <strong className="danger-text">18.75%</strong>
+                <strong className="danger-text">{`${(churnRate * 100).toFixed(2)}%`}</strong>
               </div>
             </div>
           </div>
