@@ -5,6 +5,8 @@ are required — the test suite stays runnable in CI without ML artifacts.
 """
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -12,8 +14,9 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.app import app, get_artifacts
+from src.api.app import app, get_artifacts, get_pred_logger
 from src.api.dependencies import ModelArtifacts
+from src.api.logger import PredictionLogger
 
 # ── Mock artifacts ────────────────────────────────────────────────────────────
 
@@ -71,25 +74,32 @@ VALID_SUBSCRIBER: dict[str, Any] = {
 
 
 @pytest.fixture
-def client() -> TestClient:
-    """TestClient with mock artifacts injected via dependency override."""
+def tmp_logger() -> PredictionLogger:
+    """A real PredictionLogger backed by a temporary file-based SQLite DB."""
+    with tempfile.TemporaryDirectory() as tmp:
+        yield PredictionLogger(Path(tmp) / "test_predictions.db")
+
+
+@pytest.fixture
+def client(tmp_logger: PredictionLogger) -> TestClient:
+    """TestClient with mock artifacts and a temp prediction logger."""
     app.dependency_overrides[get_artifacts] = lambda: MOCK_ARTIFACTS
+    app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
     c = TestClient(app, raise_server_exceptions=True)
     yield c  # type: ignore[misc]
     app.dependency_overrides.clear()
 
 
 @pytest.fixture
-def unready_client() -> TestClient:
+def unready_client(tmp_logger: PredictionLogger) -> TestClient:
     """TestClient with NO artifacts — simulates startup failure."""
-    app.dependency_overrides.clear()
-    # Override get_artifacts to raise 503 (same as when app.state.artifacts is None)
     from fastapi import HTTPException
 
     def _raise() -> ModelArtifacts:
         raise HTTPException(status_code=503, detail="Model artifacts not loaded.")
 
     app.dependency_overrides[get_artifacts] = _raise
+    app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
     c = TestClient(app, raise_server_exceptions=False)
     yield c  # type: ignore[misc]
     app.dependency_overrides.clear()
@@ -197,3 +207,33 @@ def test_predict_invalid_regularity_rejected(client: TestClient) -> None:
     bad = {**VALID_SUBSCRIBER, "REGULARITY": 150.0}  # > 90
     r = client.post("/predict", json={"subscribers": [bad]})
     assert r.status_code == 422
+
+
+# ── /logs ─────────────────────────────────────────────────────────────────────
+
+
+def test_logs_empty_on_fresh_db(client: TestClient) -> None:
+    r = client.get("/logs")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["summary"]["total_predictions"] == 0
+    assert body["summary"]["total_requests"] == 0
+    assert body["recent"] == []
+
+
+def test_logs_records_predict_calls(client: TestClient) -> None:
+    # Make two prediction requests
+    client.post("/predict", json={"subscribers": [VALID_SUBSCRIBER]})
+    client.post("/predict", json={"subscribers": [VALID_SUBSCRIBER] * 3})
+
+    r = client.get("/logs")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["summary"]["total_predictions"] == 4
+    assert body["summary"]["total_requests"] == 2
+    assert len(body["recent"]) == 4
+    # Each recent row has required fields
+    row = body["recent"][0]
+    assert "churn_probability" in row
+    assert "churn_prediction" in row
+    assert "latency_ms" in row

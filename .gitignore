@@ -30,6 +30,11 @@ mlruns/
 mlruns.db
 mlartifacts/
 
+# Prediction log (SQLite — local dev artifact, not committed)
+data/predictions.db
+data/predictions.db-shm
+data/predictions.db-wal
+
 # Notebooks – strip outputs before commit
 notebooks/.ipynb_checkpoints/
 

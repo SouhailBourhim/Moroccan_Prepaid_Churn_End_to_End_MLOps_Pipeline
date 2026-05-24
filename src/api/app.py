@@ -11,27 +11,37 @@ Or via config values in configs/base.yaml:
 """
 from __future__ import annotations
 
+import time
+import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any
 
 import numpy as np
 import pandas as pd
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from src.api.dependencies import ModelArtifacts, load_artifacts
+from src.api.logger import PredictionLogger
 from src.api.schemas import (
     HealthResponse,
     InfoResponse,
+    LogsResponse,
+    LogsSummary,
     PredictionRequest,
     PredictionResponse,
+    RecentPrediction,
     ReadyResponse,
     SubscriberFeatures,
     SubscriberPrediction,
 )
 from src.utils.logging import setup_logger
+
+ROOT = Path(__file__).parents[2]
+PREDICTIONS_DB = ROOT / "data" / "predictions.db"
 
 # ── Column dtype maps (mirrors ingestion.py) ──────────────────────────────────
 
@@ -55,7 +65,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except FileNotFoundError as exc:
         logger.warning(f"Model artifacts not found at startup — /predict will return 503. {exc}")
         app.state.artifacts = None
+
+    app.state.pred_logger = PredictionLogger(PREDICTIONS_DB)
+    logger.info(f"Prediction logger ready → {PREDICTIONS_DB}")
+
     yield
+
     app.state.artifacts = None
 
 
@@ -67,11 +82,12 @@ app = FastAPI(
     description=(
         "Real-time prepaid subscriber churn scoring.\n\n"
         "**POST /predict** — score up to 10 000 subscribers per request.\n"
+        "**GET  /logs**    — prediction log summary and recent scored rows.\n"
         "**GET  /info**    — model metadata and CV metrics.\n"
         "**GET  /ready**   — readiness probe (503 until model is loaded).\n"
         "**GET  /health**  — liveness probe (always 200)."
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -89,7 +105,7 @@ app.add_middleware(
 )
 
 
-# ── Dependency ────────────────────────────────────────────────────────────────
+# ── Dependencies ──────────────────────────────────────────────────────────────
 
 
 def get_artifacts() -> ModelArtifacts:
@@ -99,7 +115,12 @@ def get_artifacts() -> ModelArtifacts:
     return artifacts
 
 
+def get_pred_logger() -> PredictionLogger:
+    return app.state.pred_logger  # type: ignore[no-any-return]
+
+
 ArtifactsDep = Annotated[ModelArtifacts, Depends(get_artifacts)]
+LoggerDep = Annotated[PredictionLogger, Depends(get_pred_logger)]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -147,17 +168,26 @@ def info(artifacts: ArtifactsDep) -> InfoResponse:
 
 
 @app.post("/predict", response_model=PredictionResponse, tags=["prediction"])
-def predict(request: PredictionRequest, artifacts: ArtifactsDep) -> PredictionResponse:
+def predict(
+    request: PredictionRequest,
+    artifacts: ArtifactsDep,
+    pred_logger: LoggerDep,
+) -> PredictionResponse:
     """Score a batch of subscribers and return churn probabilities.
 
     Accepts 1–10 000 subscribers per request. Applies the full feature
     engineering pipeline before scoring, so raw Expresso columns are expected
-    (not pre-engineered features).
+    (not pre-engineered features). Every scored batch is persisted to the
+    prediction log (data/predictions.db).
     """
+    t0 = time.perf_counter()
+
     df = _to_dataframe(request.subscribers)
     X_fe = artifacts.pipeline.transform(df)
     X = X_fe[artifacts.feature_cols].to_numpy(dtype=np.float32)
     probs: np.ndarray = artifacts.model.predict_proba(X)[:, 1]
+
+    latency_ms = (time.perf_counter() - t0) * 1000.0
 
     predictions = [
         SubscriberPrediction(
@@ -167,14 +197,57 @@ def predict(request: PredictionRequest, artifacts: ArtifactsDep) -> PredictionRe
         for p in probs
     ]
 
+    model_name: str = artifacts.manifest.get("best_model", "unknown")
+    request_id = str(uuid.uuid4())
+    raw_inputs: list[dict[str, Any]] = [s.model_dump() for s in request.subscribers]
+
+    pred_logger.log_request(
+        request_id=request_id,
+        model_name=model_name,
+        n_subscribers=len(predictions),
+        threshold=request.threshold,
+        latency_ms=latency_ms,
+        probs=[float(p) for p in probs],
+        predictions=[bool(p >= request.threshold) for p in probs],
+        raw_inputs=raw_inputs,
+    )
+
     logger.debug(
         f"Scored {len(predictions)} subscribers  "
         f"threshold={request.threshold}  "
-        f"flagged={sum(s.churn_prediction for s in predictions)}"
+        f"flagged={sum(s.churn_prediction for s in predictions)}  "
+        f"latency={latency_ms:.1f}ms  "
+        f"request_id={request_id}"
     )
     return PredictionResponse(
         predictions=predictions,
-        model_name=artifacts.manifest.get("best_model", "unknown"),
+        model_name=model_name,
         threshold=request.threshold,
         n_subscribers=len(predictions),
     )
+
+
+@app.get("/logs", response_model=LogsResponse, tags=["ops"])
+def logs(
+    pred_logger: LoggerDep,
+    hours: int = Query(default=24, ge=1, le=720, description="Summary window in hours"),
+    limit: int = Query(default=50, ge=1, le=500, description="Max recent rows to return"),
+) -> LogsResponse:
+    """Return prediction log summary stats and the most recent scored rows.
+
+    - `hours`: time window for the 'predictions_last_Nh' counter (default 24)
+    - `limit`: number of recent rows to include (default 50, max 500)
+    """
+    raw_summary = pred_logger.summary(since_hours=hours)
+    raw_recent = pred_logger.recent(limit=limit)
+
+    summary = LogsSummary(
+        total_predictions=raw_summary["total_predictions"],
+        total_requests=raw_summary["total_requests"],
+        mean_churn_probability=raw_summary["mean_churn_probability"],
+        churn_flag_rate=raw_summary["churn_flag_rate"],
+        mean_latency_ms=raw_summary["mean_latency_ms"],
+    )
+    recent_rows = [RecentPrediction(**row) for row in raw_recent]
+
+    return LogsResponse(summary=summary, recent=recent_rows)

@@ -95,3 +95,27 @@ class InfoResponse(BaseModel):
     cv_roc_auc_std: float
     cv_pr_auc_mean: float
     n_features: int
+
+
+class LogsSummary(BaseModel):
+    total_predictions: int
+    total_requests: int
+    mean_churn_probability: float | None
+    churn_flag_rate: float | None
+    mean_latency_ms: float | None
+
+
+class RecentPrediction(BaseModel):
+    request_id: str
+    timestamp: str
+    model_name: str | None
+    threshold: float
+    latency_ms: float | None
+    subscriber_idx: int
+    churn_probability: float
+    churn_prediction: bool
+
+
+class LogsResponse(BaseModel):
+    summary: LogsSummary
+    recent: list[RecentPrediction]
