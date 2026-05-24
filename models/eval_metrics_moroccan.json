@@ -1,0 +1,20 @@
+{
+  "dataset": "moroccan",
+  "holdout_size": 400000.0,
+  "churn_rate": 0.027,
+  "roc_auc": 0.8965185916742797,
+  "pr_auc": 0.23193169329751395,
+  "brier": 0.12733739614486694,
+  "baseline_brier": 0.026271,
+  "f1_default": 0.1998183062101143,
+  "precision_default": 0.11367899848138742,
+  "recall_default": 0.8248148148148148,
+  "threshold_youden": 0.48641207814216614,
+  "f1_youden": 0.19582902259733187,
+  "precision_youden": 0.11096575131132366,
+  "recall_youden": 0.8325,
+  "threshold_f1": 0.8742662072181702,
+  "f1_f1opt": 0.32994850221222893,
+  "precision_f1opt": 0.27119351377131273,
+  "recall_f1opt": 0.4212037037037037
+}

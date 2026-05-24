@@ -1,11 +1,15 @@
 """Standalone holdout evaluation script for the DVC pipeline.
 
-Loads the trained model and a stratified holdout split of the training
-features, computes key metrics, writes them to models/eval_metrics.json
-(DVC metric), and logs them to MLflow for cross-run comparison.
+Expresso mode (default): loads train_features.parquet and carves a deterministic
+20% stratified holdout. Writes models/eval_metrics.json.
+
+Moroccan mode (--dataset moroccan): loads test_features.parquet directly — it is
+already the 20% stratified holdout produced by run_pipeline.py --dataset moroccan
+and contains CHURN labels. Writes models/eval_metrics_moroccan.json.
 
 Usage:
     python -m src.models.evaluate_run
+    python -m src.models.evaluate_run --dataset moroccan
     python -m src.models.evaluate_run --no-mlflow
 """
 from __future__ import annotations
@@ -41,36 +45,55 @@ def _load_config(path: Path) -> dict[str, Any]:
         return yaml.safe_load(fh)  # type: ignore[no-any-return]
 
 
-def run(use_mlflow: bool = True) -> dict[str, float]:
-    setup_logger()
-    cfg = _load_config(CONFIG_PATH)
+def _load_holdout(dataset: str) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Return (X, y, feature_cols) for the evaluation holdout."""
+    if dataset == "moroccan":
+        # test_features.parquet is already the 20% split with CHURN labels
+        df = pd.read_parquet(FEATURES_DIR / "test_features.parquet")
+        if "CHURN" not in df.columns:
+            raise RuntimeError(
+                "test_features.parquet has no CHURN column. "
+                "Re-run: python -m src.features.run_pipeline --dataset moroccan"
+            )
+        y = df["CHURN"].to_numpy()
+        feature_cols = [c for c in df.columns if c not in ("CHURN", "user_id")]
+        X = df[feature_cols].to_numpy(dtype=np.float32)
+        return X, y, feature_cols
 
-    # ── Load features ─────────────────────────────────────────────────────────
+    # Expresso: carve holdout from train_features.parquet
     df = pd.read_parquet(FEATURES_DIR / "train_features.parquet")
     y = df["CHURN"].to_numpy()
     feature_cols = [c for c in df.columns if c != "CHURN"]
     X = df[feature_cols].to_numpy(dtype=np.float32)
+    _, X_val, _, y_val = train_test_split(
+        X, y, test_size=HOLDOUT_SIZE, stratify=y, random_state=RANDOM_STATE
+    )
+    return X_val, y_val, feature_cols
+
+
+def run(dataset: str = "expresso", use_mlflow: bool = True) -> dict[str, float]:
+    setup_logger()
+    cfg = _load_config(CONFIG_PATH)
+
+    # ── Load holdout ──────────────────────────────────────────────────────────
+    X_val, y_val, feature_cols = _load_holdout(dataset)
+    logger.info(
+        f"[{dataset}] Holdout: {len(y_val):,} rows  churn={y_val.mean():.3%}"
+    )
 
     # ── Load model ────────────────────────────────────────────────────────────
     artifact: dict[str, Any] = joblib.load(MODELS_DIR / "best_model.pkl")
     model: Any = artifact["model"]
     saved_cols: list[str] = artifact["feature_cols"]
 
-    # Align columns in case pipeline produced a different order
     missing_cols = [c for c in saved_cols if c not in feature_cols]
     if missing_cols:
         raise RuntimeError(
-            "Saved model feature columns are missing from train_features.parquet: "
+            f"Saved model feature columns are missing from features parquet: "
             f"{missing_cols}. Regenerate features and retrain the model."
         )
     col_idx = [feature_cols.index(c) for c in saved_cols]
-    X = X[:, col_idx]
-
-    # ── Holdout split (deterministic) ─────────────────────────────────────────
-    _, X_val, _, y_val = train_test_split(
-        X, y, test_size=HOLDOUT_SIZE, stratify=y, random_state=RANDOM_STATE
-    )
-    logger.info(f"Holdout: {len(y_val):,} rows  churn={y_val.mean():.3%}")
+    X_val = X_val[:, col_idx]
 
     # ── Score ─────────────────────────────────────────────────────────────────
     y_prob: np.ndarray = model.predict_proba(X_val)[:, 1]
@@ -83,13 +106,17 @@ def run(use_mlflow: bool = True) -> dict[str, float]:
     m_f1 = compute_metrics(y_val, y_prob, threshold=t_f1)
 
     # ── Flat metrics dict (DVC-friendly) ──────────────────────────────────────
+    churn_rate = float(y_val.mean())
+    baseline_brier = churn_rate * (1 - churn_rate) ** 2 + (1 - churn_rate) * churn_rate ** 2
     metrics: dict[str, float] = {
+        "dataset": dataset,  # type: ignore[dict-item]
         "holdout_size": float(len(y_val)),
-        "churn_rate": float(y_val.mean()),
+        "churn_rate": churn_rate,
         # Ranking metrics (threshold-independent)
         "roc_auc": m_default["roc_auc"],
         "pr_auc": m_default["pr_auc"],
         "brier": m_default["brier"],
+        "baseline_brier": baseline_brier,
         # Threshold-based at default 0.5
         "f1_default": m_default["f1"],
         "precision_default": m_default["precision"],
@@ -106,7 +133,8 @@ def run(use_mlflow: bool = True) -> dict[str, float]:
         "recall_f1opt": m_f1["recall"],
     }
 
-    out = MODELS_DIR / "eval_metrics.json"
+    suffix = f"_{dataset}" if dataset != "expresso" else ""
+    out = MODELS_DIR / f"eval_metrics{suffix}.json"
     with open(out, "w") as fh:
         json.dump(metrics, fh, indent=2)
 
@@ -135,28 +163,35 @@ def run(use_mlflow: bool = True) -> dict[str, float]:
         mlflow.set_tracking_uri(resolved_uri)
         mlflow.set_experiment(mlflow_cfg.get("experiment_name", "moroccan_prepaid_churn"))
 
-        with mlflow.start_run(run_name="evaluate"):
+        with mlflow.start_run(run_name=f"evaluate__{dataset}"):
+            mlflow.log_param("dataset", dataset)
             mlflow.log_param("holdout_size", len(y_val))
             mlflow.log_param("n_features", len(saved_cols))
             mlflow.log_param("model_name", artifact.get("model", "unknown").__class__.__name__)
             for key, val in metrics.items():
-                if key not in ("holdout_size", "churn_rate"):
-                    mlflow.log_metric(key, val)
+                if key not in ("holdout_size", "churn_rate", "dataset"):
+                    mlflow.log_metric(key, val)  # type: ignore[arg-type]
             mlflow.log_artifact(str(out), "evaluation")
 
-            run = mlflow.active_run()
-            if run is not None:
-                logger.info(f"MLflow run: {run.info.run_id}")
+            active = mlflow.active_run()
+            if active is not None:
+                logger.info(f"MLflow run: {active.info.run_id}")
 
     return metrics
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
+    p.add_argument(
+        "--dataset",
+        choices=["expresso", "moroccan"],
+        default="expresso",
+        help="Which dataset's holdout to evaluate against",
+    )
     p.add_argument("--no-mlflow", dest="use_mlflow", action="store_false")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    run(use_mlflow=args.use_mlflow)
+    run(dataset=args.dataset, use_mlflow=args.use_mlflow)
