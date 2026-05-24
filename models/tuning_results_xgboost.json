@@ -1,0 +1,17 @@
+{
+  "max_depth": 7,
+  "learning_rate": 0.02577746561662676,
+  "subsample": 0.6622238407613176,
+  "colsample_bytree": 0.45536802970967816,
+  "min_child_weight": 260,
+  "reg_alpha": 0.10274247922038177,
+  "reg_lambda": 8.12890615644288,
+  "gamma": 4.947306277660574,
+  "mean_best_iteration": 378,
+  "sample_cv_roc_auc": 0.8959252859109949,
+  "full_cv_roc_auc_mean": 0.8971683660883792,
+  "full_cv_roc_auc_std": 0.001419121558563491,
+  "n_trials_completed": 50,
+  "n_trials_pruned": 21,
+  "sample_size": 400000
+}

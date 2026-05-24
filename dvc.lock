@@ -1,0 +1,138 @@
+schema: '2.0'
+stages:
+  featurize:
+    cmd: python -m src.features.run_pipeline --no-mlflow
+    deps:
+    - path: data/raw/expresso/Test.csv
+      hash: md5
+      md5: ae65c3f2168ff88685ab0c0c003d7f5c
+      size: 44997161
+    - path: data/raw/expresso/Train.csv
+      hash: md5
+      md5: 16cccdd3289f1f95eb993a1f811f6bbc
+      size: 259026777
+    - path: src/data/ingestion.py
+      hash: md5
+      md5: 5c06c69876d934130e5d68b954a9e7a3
+      size: 1211
+    - path: src/data/validation.py
+      hash: md5
+      md5: 0b1d8f8b27711ee2860217540515ce51
+      size: 2286
+    - path: src/features/build_features.py
+      hash: md5
+      md5: 98b1dc44a37ec5a0db61f81049457649
+      size: 21538
+    - path: src/features/run_pipeline.py
+      hash: md5
+      md5: 457ea507ea3cc8cdc0699de0a5bae411
+      size: 9417
+    params:
+      configs/base.yaml:
+        features:
+          top_pack_min_freq: 200
+          target_enc_smoothing: 20.0
+          regularity_inactive_threshold: 5
+    outs:
+    - path: data/features/feature_manifest.json
+      hash: md5
+      md5: c27cc3a8bcdb2f5d9d9008498efafbc3
+      size: 893
+    - path: data/features/feature_pipeline.pkl
+      hash: md5
+      md5: 046d81d334c9d70ec3a5ec194d539cd8
+      size: 7254
+    - path: data/features/feature_stats.csv
+      hash: md5
+      md5: e7655cca496f6f91d980d9d9f121c8cc
+      size: 2742
+    - path: data/features/test_features.parquet
+      hash: md5
+      md5: a114220f4890a00d6c223d7b78b3c66e
+      size: 23958052
+    - path: data/features/train_features.parquet
+      hash: md5
+      md5: 15649af191f08b53944bf75babba3c0b
+      size: 54346696
+  train:
+    cmd: python -m src.models.train --no-mlflow
+    deps:
+    - path: data/features/train_features.parquet
+      hash: md5
+      md5: 15649af191f08b53944bf75babba3c0b
+      size: 54346696
+    - path: src/models/train.py
+      hash: md5
+      md5: dee479c2eed3ea26296fafb13c881840
+      size: 17294
+    params:
+      configs/base.yaml:
+        catboost:
+          iterations: 1000
+          depth: 7
+          learning_rate: 0.05
+          l2_leaf_reg: 3.0
+          subsample: 0.8
+          colsample_bylevel: 0.8
+          min_data_in_leaf: 50
+        lightgbm:
+          n_estimators: 1000
+          max_depth: 7
+          learning_rate: 0.05
+          num_leaves: 127
+          subsample: 0.8
+          colsample_bytree: 0.8
+          min_child_samples: 100
+          reg_alpha: 0.1
+          reg_lambda: 1.0
+        logistic_regression:
+          C: 0.1
+          max_iter: 1000
+        training:
+          random_state: 42
+          test_size: 0.2
+          cv_folds: 5
+          eval_metric: roc_auc
+          early_stopping_rounds: 50
+        xgboost:
+          n_estimators: 1000
+          max_depth: 7
+          learning_rate: 0.05
+          subsample: 0.8
+          colsample_bytree: 0.8
+          min_child_weight: 50
+          reg_alpha: 0.1
+          reg_lambda: 1.0
+    outs:
+    - path: models/best_model.pkl
+      hash: md5
+      md5: a1e7d84b13a59bce7f6f2d1fcaba3982
+      size: 2159021
+    - path: models/training_manifest.json
+      hash: md5
+      md5: 252dedf01d3e25144dbe5853f24c0ff4
+      size: 2838
+  evaluate:
+    cmd: python -m src.models.evaluate_run
+    deps:
+    - path: data/features/train_features.parquet
+      hash: md5
+      md5: 15649af191f08b53944bf75babba3c0b
+      size: 54346696
+    - path: models/best_model.pkl
+      hash: md5
+      md5: a1e7d84b13a59bce7f6f2d1fcaba3982
+      size: 2159021
+    - path: src/models/evaluate.py
+      hash: md5
+      md5: 366399779fbebd463ca12fc435578033
+      size: 8378
+    - path: src/models/evaluate_run.py
+      hash: md5
+      md5: ea80710710e7f172f946dd4f856586f7
+      size: 6482
+    outs:
+    - path: models/eval_metrics.json
+      hash: md5
+      md5: 637d106a08db0287f505eb19cc8e3f6c
+      size: 591

@@ -1,0 +1,13 @@
+2026-04-30 11:07:06.230 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-04-30 11:07:06.230 | INFO     | src.api.app:lifespan:53 - API ready
+2026-04-30 11:08:04.849 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-04-30 11:08:04.850 | INFO     | src.api.app:lifespan:53 - API ready
+2026-04-30 11:09:20.443 | DEBUG    | src.api.app:predict:156 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-04-30 11:14:49.171 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-04-30 11:14:49.172 | INFO     | src.api.app:lifespan:53 - API ready
+2026-04-30 11:15:12.179 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-04-30 11:15:12.179 | INFO     | src.api.app:lifespan:53 - API ready
+2026-04-30 11:15:35.937 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-04-30 11:15:35.937 | INFO     | src.api.app:lifespan:53 - API ready
+2026-04-30 11:21:27.170 | DEBUG    | src.api.app:predict:156 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-04-30 11:22:05.865 | DEBUG    | src.api.app:predict:156 - Scored 1 subscribers  threshold=0.5  flagged=0

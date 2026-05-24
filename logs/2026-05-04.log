@@ -1,0 +1,99 @@
+2026-05-04 01:08:10.982 | INFO     | __main__:train:240 - Features loaded: 2,154,048 rows × 44 cols  churn rate=18.755%
+2026-05-04 01:08:10.984 | INFO     | __main__:train:253 - Class ratio: 1750062 neg / 403986 pos  scale_pos_weight=4.33
+2026-05-04 01:08:10.986 | INFO     | __main__:train:272 - CV scoring logistic_regression…
+2026-05-04 01:08:35.145 | DEBUG    | __main__:_cv_score:196 -   [logistic_regression] fold 1: ROC-AUC=0.9277  PR-AUC=0.6874
+2026-05-04 01:08:50.507 | DEBUG    | __main__:_cv_score:196 -   [logistic_regression] fold 2: ROC-AUC=0.9286  PR-AUC=0.6909
+2026-05-04 01:09:03.506 | DEBUG    | __main__:_cv_score:196 -   [logistic_regression] fold 3: ROC-AUC=0.9281  PR-AUC=0.6885
+2026-05-04 01:09:17.664 | DEBUG    | __main__:_cv_score:196 -   [logistic_regression] fold 4: ROC-AUC=0.9286  PR-AUC=0.6899
+2026-05-04 01:09:30.248 | DEBUG    | __main__:_cv_score:196 -   [logistic_regression] fold 5: ROC-AUC=0.9290  PR-AUC=0.6927
+2026-05-04 01:09:30.251 | INFO     | __main__:_cv_score:210 - [logistic_regression] CV ROC-AUC=0.9284 ± 0.0005  PR-AUC=0.6899  (79.3s)
+2026-05-04 01:09:30.270 | INFO     | __main__:train:272 - CV scoring xgboost…
+2026-05-04 01:10:42.913 | DEBUG    | __main__:_cv_score:196 -   [xgboost] fold 1: ROC-AUC=0.9306  PR-AUC=0.7004
+2026-05-04 01:12:00.044 | DEBUG    | __main__:_cv_score:196 -   [xgboost] fold 2: ROC-AUC=0.9319  PR-AUC=0.7055
+2026-05-04 01:13:44.838 | DEBUG    | __main__:_cv_score:196 -   [xgboost] fold 3: ROC-AUC=0.9311  PR-AUC=0.7033
+2026-05-04 01:15:00.304 | DEBUG    | __main__:_cv_score:196 -   [xgboost] fold 4: ROC-AUC=0.9317  PR-AUC=0.7043
+2026-05-04 01:21:08.557 | INFO     | __main__:train:280 - Features loaded: 2,154,048 rows × 44 cols  churn rate=18.755%
+2026-05-04 01:21:08.559 | INFO     | __main__:train:293 - Class ratio: 1750062 neg / 403986 pos  scale_pos_weight=4.33
+2026-05-04 01:21:08.560 | INFO     | __main__:train:312 - CV scoring logistic_regression…
+2026-05-04 01:21:22.438 | DEBUG    | __main__:_cv_score:236 -   [logistic_regression] fold 1: ROC-AUC=0.9277  PR-AUC=0.6874
+2026-05-04 01:21:38.327 | DEBUG    | __main__:_cv_score:236 -   [logistic_regression] fold 2: ROC-AUC=0.9286  PR-AUC=0.6909
+2026-05-04 01:21:51.171 | DEBUG    | __main__:_cv_score:236 -   [logistic_regression] fold 3: ROC-AUC=0.9281  PR-AUC=0.6885
+2026-05-04 01:22:03.916 | DEBUG    | __main__:_cv_score:236 -   [logistic_regression] fold 4: ROC-AUC=0.9286  PR-AUC=0.6899
+2026-05-04 01:22:15.398 | DEBUG    | __main__:_cv_score:236 -   [logistic_regression] fold 5: ROC-AUC=0.9290  PR-AUC=0.6927
+2026-05-04 01:22:15.400 | INFO     | __main__:_cv_score:250 - [logistic_regression] CV ROC-AUC=0.9284 ± 0.0005  PR-AUC=0.6899  (66.8s)
+2026-05-04 01:22:15.419 | INFO     | __main__:train:312 - CV scoring xgboost…
+2026-05-04 01:23:20.739 | DEBUG    | __main__:_cv_score:236 -   [xgboost] fold 1: ROC-AUC=0.9307  PR-AUC=0.7005
+2026-05-04 01:24:20.174 | DEBUG    | __main__:_cv_score:236 -   [xgboost] fold 2: ROC-AUC=0.9320  PR-AUC=0.7055
+2026-05-04 01:25:31.540 | DEBUG    | __main__:_cv_score:236 -   [xgboost] fold 3: ROC-AUC=0.9312  PR-AUC=0.7033
+2026-05-04 01:26:42.732 | DEBUG    | __main__:_cv_score:236 -   [xgboost] fold 4: ROC-AUC=0.9318  PR-AUC=0.7043
+2026-05-04 01:27:47.535 | DEBUG    | __main__:_cv_score:236 -   [xgboost] fold 5: ROC-AUC=0.9320  PR-AUC=0.7060
+2026-05-04 01:27:47.539 | INFO     | __main__:_cv_score:250 - [xgboost] CV ROC-AUC=0.9315 ± 0.0005  PR-AUC=0.7039  (332.1s)
+2026-05-04 01:27:47.569 | INFO     | __main__:train:312 - CV scoring lightgbm…
+2026-05-04 01:27:58.852 | DEBUG    | __main__:_cv_score:236 -   [lightgbm] fold 1: ROC-AUC=0.9302  PR-AUC=0.6991
+2026-05-04 01:28:11.517 | DEBUG    | __main__:_cv_score:236 -   [lightgbm] fold 2: ROC-AUC=0.9315  PR-AUC=0.7043
+2026-05-04 01:28:24.558 | DEBUG    | __main__:_cv_score:236 -   [lightgbm] fold 3: ROC-AUC=0.9308  PR-AUC=0.7021
+2026-05-04 01:28:37.925 | DEBUG    | __main__:_cv_score:236 -   [lightgbm] fold 4: ROC-AUC=0.9313  PR-AUC=0.7029
+2026-05-04 01:28:51.590 | DEBUG    | __main__:_cv_score:236 -   [lightgbm] fold 5: ROC-AUC=0.9316  PR-AUC=0.7048
+2026-05-04 01:28:51.592 | INFO     | __main__:_cv_score:250 - [lightgbm] CV ROC-AUC=0.9311 ± 0.0005  PR-AUC=0.7026  (64.0s)
+2026-05-04 01:28:51.611 | INFO     | __main__:train:312 - CV scoring catboost…
+2026-05-04 01:31:50.834 | DEBUG    | __main__:_cv_score:236 -   [catboost] fold 1: ROC-AUC=0.9307  PR-AUC=0.7007
+2026-05-04 01:35:59.344 | DEBUG    | __main__:_cv_score:236 -   [catboost] fold 2: ROC-AUC=0.9320  PR-AUC=0.7057
+2026-05-04 01:40:23.355 | DEBUG    | __main__:_cv_score:236 -   [catboost] fold 3: ROC-AUC=0.9313  PR-AUC=0.7034
+2026-05-04 01:44:04.718 | DEBUG    | __main__:_cv_score:236 -   [catboost] fold 4: ROC-AUC=0.9318  PR-AUC=0.7040
+2026-05-04 01:47:30.085 | DEBUG    | __main__:_cv_score:236 -   [catboost] fold 5: ROC-AUC=0.9320  PR-AUC=0.7059
+2026-05-04 01:47:30.089 | INFO     | __main__:_cv_score:250 - [catboost] CV ROC-AUC=0.9316 ± 0.0005  PR-AUC=0.7039  (1118.4s)
+2026-05-04 01:47:30.125 | INFO     | __main__:train:318 - 
+Best model: catboost  ROC-AUC=0.9316 ± 0.0005
+2026-05-04 01:47:30.126 | INFO     | __main__:train:324 - Refitting catboost on full training set…
+2026-05-04 01:52:58.589 | INFO     | __main__:train:328 - Refit complete (328.5s)
+2026-05-04 01:52:58.618 | INFO     | __main__:train:358 - Saved: /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/models/best_model.pkl  /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/models/training_manifest.json
+2026-05-04 01:53:04.699 | INFO     | __main__:run:55 - Holdout: 430,810 rows  churn=18.755%
+2026-05-04 01:53:06.405 | INFO     | __main__:run:95 - Holdout ROC-AUC=0.9330  PR-AUC=0.7071  Brier=0.1119
+2026-05-04 01:53:06.405 | INFO     | __main__:run:100 - Youden threshold=0.501  F1=0.679  P=0.537  R=0.923
+2026-05-04 01:53:06.406 | INFO     | __main__:run:106 - Metrics saved → /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/models/eval_metrics.json
+2026-05-04 04:56:12.591 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-05-04 04:56:12.592 | INFO     | src.api.app:lifespan:53 - API ready
+2026-05-04 05:00:53.129 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-05-04 05:00:53.130 | INFO     | src.api.app:lifespan:53 - API ready
+2026-05-04 05:06:06.880 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-05-04 05:06:06.880 | INFO     | src.api.app:lifespan:54 - API ready
+2026-05-04 05:06:57.868 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-05-04 05:06:57.868 | INFO     | src.api.app:lifespan:54 - API ready
+2026-05-04 05:08:57.035 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-05-04 05:08:57.036 | INFO     | src.api.app:lifespan:54 - API ready
+2026-05-04 05:09:23.924 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:10:28.300 | INFO     | src.api.dependencies:load_artifacts:53 - Artifacts loaded: model=catboost  features=44
+2026-05-04 05:10:28.301 | INFO     | src.api.app:lifespan:54 - API ready
+2026-05-04 05:10:37.518 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:10:46.600 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:10:47.361 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:10:47.963 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:10:48.518 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:10:49.060 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:10:52.295 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.56  flagged=0
+2026-05-04 05:10:54.448 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.79  flagged=0
+2026-05-04 05:10:57.751 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.86  flagged=0
+2026-05-04 05:11:00.263 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.15  flagged=0
+2026-05-04 05:11:03.496 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:05.607 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:07.598 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:08.046 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:08.329 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:08.529 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:08.673 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:08.844 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:08.992 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:09.156 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:09.326 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:09.561 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.1  flagged=0
+2026-05-04 05:11:12.660 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.86  flagged=0
+2026-05-04 05:11:35.834 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:16:48.892 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:25:12.126 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:25:33.806 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:26:36.344 | DEBUG    | src.api.app:predict:170 - Scored 2 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:26:53.156 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:27:01.621 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:27:38.639 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=0
+2026-05-04 05:31:33.407 | DEBUG    | src.api.app:predict:170 - Scored 2 subscribers  threshold=0.5  flagged=1
+2026-05-04 05:31:44.983 | DEBUG    | src.api.app:predict:170 - Scored 1 subscribers  threshold=0.5  flagged=1

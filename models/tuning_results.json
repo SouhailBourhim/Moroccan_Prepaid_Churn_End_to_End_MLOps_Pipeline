@@ -1,0 +1,15 @@
+{
+  "depth": 4,
+  "learning_rate": 0.04557676613039301,
+  "l2_leaf_reg": 8.919891519672209,
+  "subsample": 0.8736079919565056,
+  "colsample_bylevel": 0.7571854404728295,
+  "min_data_in_leaf": 180,
+  "mean_best_iteration": 552,
+  "sample_cv_roc_auc": 0.894151068209467,
+  "full_cv_roc_auc_mean": 0.8957062051623581,
+  "full_cv_roc_auc_std": 0.0014562365771729267,
+  "n_trials_completed": 50,
+  "n_trials_pruned": 15,
+  "sample_size": 400000
+}

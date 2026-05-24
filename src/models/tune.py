@@ -1,24 +1,25 @@
-"""Optuna hyperparameter search for CatBoost on Expresso churn features.
+"""Optuna hyperparameter search for CatBoost or XGBoost on churn features.
 
 Strategy
 --------
-Tuning on 2.15M rows with 5-fold CV × 50 trials would take many hours.
+Tuning on 1.6M rows with 5-fold CV × 50 trials would take many hours.
 Instead we:
   1. Draw a stratified subsample (default 400k rows) for the Optuna search.
      This is large enough to capture the signal but fast enough to finish in
-     a reasonable time (~30–60 min on CPU).
+     a reasonable time (~30–90 min on CPU depending on model).
   2. Use 3-fold CV during search (not 5) to halve the per-trial cost.
-  3. Use CatBoost's built-in early stopping so `iterations` is a ceiling,
+  3. Use early stopping so `iterations`/`n_estimators` is a ceiling,
      not a fixed cost — bad configs terminate early.
   4. After Optuna picks the best params, re-validate them on the full
      training set with the standard 5-fold CV to confirm the gain holds.
-  5. Save the best params to models/tuning_results.json and patch them into
-     configs/base.yaml so subsequent train.py runs pick them up automatically.
+  5. Save the best params to models/tuning_results_{model}.json and patch
+     them into configs/base.yaml so subsequent train.py runs pick them up.
 
 Usage
 -----
-    python -m src.models.tune                          # 50 trials, 400k sample
-    python -m src.models.tune --trials 20 --sample 200000
+    python -m src.models.tune                            # CatBoost, 50 trials
+    python -m src.models.tune --model xgboost            # XGBoost, 50 trials
+    python -m src.models.tune --model xgboost --trials 30 --sample 200000
     python -m src.models.tune --no-mlflow
 """
 from __future__ import annotations
@@ -39,6 +40,7 @@ from catboost import CatBoostClassifier
 from loguru import logger
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
+from xgboost import XGBClassifier
 
 from src.utils.logging import setup_logger
 
@@ -55,11 +57,10 @@ def _load_config(path: Path) -> dict[str, Any]:
         return yaml.safe_load(fh)  # type: ignore[no-any-return]
 
 
-# ── Search space ──────────────────────────────────────────────────────────────
+# ── Search spaces ─────────────────────────────────────────────────────────────
 
 
-def _suggest_params(trial: optuna.Trial, random_state: int) -> dict[str, Any]:
-    """Define the CatBoost hyperparameter search space."""
+def _suggest_catboost(trial: optuna.Trial, random_state: int) -> dict[str, Any]:
     return {
         "iterations": 2000,
         "depth": trial.suggest_int("depth", 4, 10),
@@ -76,6 +77,28 @@ def _suggest_params(trial: optuna.Trial, random_state: int) -> dict[str, Any]:
     }
 
 
+def _suggest_xgboost(
+    trial: optuna.Trial, random_state: int, scale_pos_weight: float
+) -> dict[str, Any]:
+    return {
+        "n_estimators": 2000,
+        "max_depth": trial.suggest_int("max_depth", 3, 10),
+        "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
+        "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 10, 300),
+        "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+        "reg_lambda": trial.suggest_float("reg_lambda", 0.5, 10.0),
+        "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+        "scale_pos_weight": scale_pos_weight,
+        "early_stopping_rounds": 50,
+        "eval_metric": "auc",
+        "random_state": random_state,
+        "n_jobs": -1,
+        "verbosity": 0,
+    }
+
+
 # ── Objective ─────────────────────────────────────────────────────────────────
 
 
@@ -84,10 +107,15 @@ def _objective(
     X: np.ndarray,
     y: np.ndarray,
     cv: StratifiedKFold,
+    model_name: str,
     random_state: int,
+    scale_pos_weight: float,
 ) -> float:
     """Optuna objective: mean CV ROC-AUC with early stopping and pruning."""
-    params = _suggest_params(trial, random_state)
+    if model_name == "catboost":
+        params = _suggest_catboost(trial, random_state)
+    else:
+        params = _suggest_xgboost(trial, random_state, scale_pos_weight)
 
     scores: list[float] = []
     best_iters: list[int] = []
@@ -96,15 +124,19 @@ def _objective(
         X_tr, X_val = X[train_idx], X[val_idx]
         y_tr, y_val = y[train_idx], y[val_idx]
 
-        model = CatBoostClassifier(**params)
-        model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
+        if model_name == "catboost":
+            model: Any = CatBoostClassifier(**params)
+            model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
+            best_iters.append(int(model.get_best_iteration() or params["iterations"]))
+        else:
+            model = XGBClassifier(**params)
+            model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+            best_iters.append(int(model.best_iteration + 1))
 
         y_prob: np.ndarray = model.predict_proba(X_val)[:, 1]
         fold_auc = float(roc_auc_score(y_val, y_prob))
         scores.append(fold_auc)
-        best_iters.append(int(model.get_best_iteration() or params["iterations"]))
 
-        # Report running mean so the pruner can cut bad trials after fold 1
         trial.report(float(np.mean(scores)), step=fold_idx)
         if trial.should_prune():
             raise optuna.TrialPruned()
@@ -123,13 +155,22 @@ def _full_cv_score(
     y: np.ndarray,
     cv_folds: int,
     random_state: int,
+    model_name: str,
 ) -> tuple[float, float]:
     """Re-evaluate the tuned params on the full dataset with 5-fold CV."""
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     scores: list[float] = []
     for train_idx, val_idx in cv.split(X, y):
-        model = CatBoostClassifier(**params)
-        model.fit(X[train_idx], y[train_idx], eval_set=(X[val_idx], y[val_idx]))
+        if model_name == "catboost":
+            model: Any = CatBoostClassifier(**params)
+            model.fit(X[train_idx], y[train_idx], eval_set=(X[val_idx], y[val_idx]))
+        else:
+            model = XGBClassifier(**params)
+            model.fit(
+                X[train_idx], y[train_idx],
+                eval_set=[(X[val_idx], y[val_idx])],
+                verbose=False,
+            )
         y_prob: np.ndarray = model.predict_proba(X[val_idx])[:, 1]
         scores.append(float(roc_auc_score(y[val_idx], y_prob)))
     return float(np.mean(scores)), float(np.std(scores))
@@ -138,25 +179,42 @@ def _full_cv_score(
 # ── Config patch ──────────────────────────────────────────────────────────────
 
 
-def _patch_config(config_path: Path, best_params: dict[str, Any]) -> None:
-    """Write the tuned CatBoost params back into configs/base.yaml."""
+def _patch_config(
+    config_path: Path, best_params: dict[str, Any], model_name: str
+) -> None:
+    """Write the tuned params back into configs/base.yaml."""
     with open(config_path) as fh:
         cfg = yaml.safe_load(fh)
 
-    cfg["catboost"] = {
-        "iterations": best_params.get("mean_best_iteration", 1000),
-        "depth": best_params["depth"],
-        "learning_rate": round(best_params["learning_rate"], 6),
-        "l2_leaf_reg": round(best_params["l2_leaf_reg"], 4),
-        "subsample": round(best_params["subsample"], 4),
-        "colsample_bylevel": round(best_params["colsample_bylevel"], 4),
-        "min_data_in_leaf": best_params["min_data_in_leaf"],
-    }
+    n_est = best_params.get("mean_best_iteration", 1000)
+
+    if model_name == "catboost":
+        cfg["catboost"] = {
+            "iterations": n_est,
+            "depth": best_params["depth"],
+            "learning_rate": round(best_params["learning_rate"], 6),
+            "l2_leaf_reg": round(best_params["l2_leaf_reg"], 4),
+            "subsample": round(best_params["subsample"], 4),
+            "colsample_bylevel": round(best_params["colsample_bylevel"], 4),
+            "min_data_in_leaf": best_params["min_data_in_leaf"],
+        }
+    else:
+        cfg["xgboost"] = {
+            "n_estimators": n_est,
+            "max_depth": best_params["max_depth"],
+            "learning_rate": round(best_params["learning_rate"], 6),
+            "subsample": round(best_params["subsample"], 4),
+            "colsample_bytree": round(best_params["colsample_bytree"], 4),
+            "min_child_weight": best_params["min_child_weight"],
+            "reg_alpha": round(best_params["reg_alpha"], 6),
+            "reg_lambda": round(best_params["reg_lambda"], 4),
+            "gamma": round(best_params["gamma"], 4),
+        }
 
     with open(config_path, "w") as fh:
         yaml.dump(cfg, fh, default_flow_style=False, sort_keys=False)
 
-    logger.info(f"configs/base.yaml catboost section updated → {config_path}")
+    logger.info(f"configs/base.yaml {model_name} section updated → {config_path}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -167,11 +225,14 @@ def tune(
     sample_size: int = 400_000,
     use_mlflow: bool = True,
     config_path: Path = CONFIG_PATH,
+    model_name: str = "catboost",
 ) -> dict[str, Any]:
     """Run Optuna search, validate winner on full data, persist results.
 
     Returns the best params dict (with meta-keys mean_best_iteration, etc.).
     """
+    if model_name not in ("catboost", "xgboost"):
+        raise ValueError(f"--model must be catboost or xgboost, got {model_name!r}")
     setup_logger()
     cfg = _load_config(config_path)
     training_cfg = cfg["training"]
@@ -189,9 +250,13 @@ def tune(
     feature_cols = [c for c in df.columns if c != "CHURN"]
     X_full = df[feature_cols].to_numpy(dtype=np.float32)
 
+    n_pos = float(y_full.sum())
+    n_neg = float(len(y_full)) - n_pos
+    scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
+
     logger.info(
         f"Full dataset: {X_full.shape[0]:,} rows × {X_full.shape[1]} cols  "
-        f"churn={y_full.mean():.3%}"
+        f"churn={y_full.mean():.3%}  model={model_name}"
     )
 
     # ── 2. Stratified subsample for Optuna ────────────────────────────────────
@@ -227,7 +292,9 @@ def tune(
     logger.info(f"Starting Optuna search: {n_trials} trials…")
 
     study.optimize(
-        lambda trial: _objective(trial, X_sample, y_sample, search_cv, random_state),
+        lambda trial: _objective(
+            trial, X_sample, y_sample, search_cv, model_name, random_state, scale_pos_weight
+        ),
         n_trials=n_trials,
         show_progress_bar=True,
     )
@@ -242,14 +309,26 @@ def tune(
 
     # ── 4. Full-data validation ───────────────────────────────────────────────
     mean_best_iter = best_trial.user_attrs.get("mean_best_iteration", 1000)
-    full_params: dict[str, Any] = {
-        **best_trial.params,
-        "iterations": mean_best_iter,
-        "auto_class_weights": "Balanced",
-        "verbose": 0,
-        "allow_writing_files": False,
-        "random_seed": random_state,
-    }
+    if model_name == "catboost":
+        full_params: dict[str, Any] = {
+            **best_trial.params,
+            "iterations": mean_best_iter,
+            "auto_class_weights": "Balanced",
+            "verbose": 0,
+            "allow_writing_files": False,
+            "random_seed": random_state,
+        }
+    else:
+        full_params = {
+            **best_trial.params,
+            "n_estimators": mean_best_iter,
+            "scale_pos_weight": scale_pos_weight,
+            "early_stopping_rounds": 50,
+            "eval_metric": "auc",
+            "random_state": random_state,
+            "n_jobs": -1,
+            "verbosity": 0,
+        }
 
     logger.info("Validating best params on full dataset (5-fold CV)…")
     t1 = time.perf_counter()
@@ -257,6 +336,7 @@ def tune(
         full_params, X_full, y_full,
         cv_folds=int(training_cfg["cv_folds"]),
         random_state=random_state,
+        model_name=model_name,
     )
     val_elapsed = time.perf_counter() - t1
 
@@ -284,18 +364,24 @@ def tune(
         "sample_size": actual_sample,
     }
 
-    results_path = MODELS_DIR / "tuning_results.json"
+    results_path = MODELS_DIR / f"tuning_results_{model_name}.json"
     with open(results_path, "w") as fh:
         json.dump(best_params_out, fh, indent=2)
 
-    _patch_config(config_path, best_params_out)
+    _patch_config(config_path, best_params_out, model_name)
     logger.info(f"Tuning results saved → {results_path}")
 
     # ── 6. Refit on full data and replace best_model.pkl ──────────────────────
-    logger.info("Refitting tuned CatBoost on full training data…")
+    logger.info(f"Refitting tuned {model_name} on full training data…")
     t2 = time.perf_counter()
-    final_model = CatBoostClassifier(**full_params)
-    final_model.fit(X_full, y_full)
+    if model_name == "catboost":
+        final_model: Any = CatBoostClassifier(**full_params)
+        final_model.fit(X_full, y_full)
+    else:
+        xgb_refit_params = {**full_params}
+        xgb_refit_params.pop("early_stopping_rounds", None)
+        final_model = XGBClassifier(**xgb_refit_params)
+        final_model.fit(X_full, y_full)
     refit_elapsed = time.perf_counter() - t2
     logger.info(f"Refit complete ({refit_elapsed/60:.1f} min)")
 
@@ -322,7 +408,7 @@ def tune(
         mlflow.set_tracking_uri(resolved_uri)
         mlflow.set_experiment(mlflow_cfg.get("experiment_name", "moroccan_prepaid_churn"))
 
-        with mlflow.start_run(run_name="catboost_optuna_tuning"):
+        with mlflow.start_run(run_name=f"{model_name}_optuna_tuning"):
             mlflow.log_param("n_trials", n_trials)
             mlflow.log_param("sample_size", actual_sample)
             mlflow.log_param("n_trials_pruned", best_params_out["n_trials_pruned"])
@@ -355,11 +441,16 @@ def tune(
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Optuna CatBoost hyperparameter search")
+    p = argparse.ArgumentParser(
+        description="Optuna hyperparameter search for CatBoost or XGBoost",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--model", choices=["catboost", "xgboost"], default="catboost",
+                   help="Model to tune")
     p.add_argument("--trials", type=int, default=50, dest="n_trials",
-                   help="Number of Optuna trials (default: 50)")
+                   help="Number of Optuna trials")
     p.add_argument("--sample", type=int, default=400_000, dest="sample_size",
-                   help="Stratified subsample size for search (default: 400000)")
+                   help="Stratified subsample size for search")
     p.add_argument("--config", type=Path, default=CONFIG_PATH)
     p.add_argument("--no-mlflow", dest="use_mlflow", action="store_false")
     return p.parse_args()
@@ -372,4 +463,5 @@ if __name__ == "__main__":
         sample_size=args.sample_size,
         use_mlflow=args.use_mlflow,
         config_path=args.config,
+        model_name=args.model,
     )

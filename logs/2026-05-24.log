@@ -1,0 +1,155 @@
+2026-05-24 00:37:14.791 | INFO     | __main__:run:91 - Loading raw data  (dataset=moroccan) …
+2026-05-24 00:37:19.832 | INFO     | __main__:run:114 - Moroccan split  train=1,600,000  test=400,000  (5.0s)
+2026-05-24 00:37:19.832 | INFO     | __main__:run:137 - Fitting FeaturePipeline on train…
+2026-05-24 00:37:24.171 | INFO     | __main__:run:153 - Pipeline fit complete (4.3s)
+2026-05-24 00:37:24.172 | INFO     | __main__:run:156 - Transforming test set…
+2026-05-24 00:37:24.675 | INFO     | __main__:run:162 - Final feature count: 36
+2026-05-24 00:37:29.468 | INFO     | __main__:run:170 - 
+                   null_rate  pct_zero  spearman_with_churn
+is_inactive              0.0  0.896984               0.2719
+regularity_rate          0.0  0.000000              -0.2062
+TOP_PACK_missing         0.0  0.716694               0.2013
+top_pack_te              0.0  0.000000               0.1599
+top_pack_freq            0.0  0.000000               0.1594
+FREQUENCE_RECH           0.0  0.000000               0.0652
+total_calls              0.0  0.092384               0.0526
+REVENUE                  0.0  0.000000               0.0444
+FREQ_TOP_PACK            0.0  0.422841               0.0342
+ON_NET                   0.0  0.397801               0.0337
+MONTANT                  0.0  0.000000               0.0316
+recharge_per_freq        0.0  0.000000              -0.0203
+TIGO                     0.0  0.623474               0.0181
+revenue_per_freq         0.0  0.000000               0.0172
+ORANGE                   0.0  0.427211               0.0155
+2026-05-24 00:37:29.468 | INFO     | __main__:run:179 - Saving features to parquet…
+2026-05-24 00:37:30.869 | INFO     | __main__:run:206 - Saved: train_features.parquet (1,600,000 rows × 36 cols), test_features.parquet (400,000 rows)
+2026-05-24 00:37:30.869 | INFO     | __main__:run:247 - Feature engineering complete in 16.1s
+2026-05-24 00:45:47.663 | INFO     | __main__:run:91 - Loading raw data  (dataset=moroccan) …
+2026-05-24 00:45:52.365 | INFO     | __main__:run:114 - Moroccan split  train=1,600,000  test=400,000  (4.7s)
+2026-05-24 00:45:52.365 | INFO     | __main__:run:137 - Fitting FeaturePipeline on train…
+2026-05-24 00:45:56.982 | INFO     | __main__:run:153 - Pipeline fit complete (4.6s)
+2026-05-24 00:45:56.983 | INFO     | __main__:run:156 - Transforming test set…
+2026-05-24 00:45:57.470 | INFO     | __main__:run:162 - Final feature count: 36
+2026-05-24 00:46:02.485 | INFO     | __main__:run:170 - 
+                   null_rate  pct_zero  spearman_with_churn
+is_inactive              0.0  0.896984               0.2719
+regularity_rate          0.0  0.000000              -0.2062
+TOP_PACK_missing         0.0  0.716694               0.2013
+top_pack_te              0.0  0.000000               0.1599
+top_pack_freq            0.0  0.000000               0.1594
+FREQUENCE_RECH           0.0  0.000000               0.0652
+total_calls              0.0  0.092384               0.0526
+REVENUE                  0.0  0.000000               0.0444
+FREQ_TOP_PACK            0.0  0.422841               0.0342
+ON_NET                   0.0  0.397801               0.0337
+MONTANT                  0.0  0.000000               0.0316
+recharge_per_freq        0.0  0.000000              -0.0203
+TIGO                     0.0  0.623474               0.0181
+revenue_per_freq         0.0  0.000000               0.0172
+ORANGE                   0.0  0.427211               0.0155
+2026-05-24 00:46:02.485 | INFO     | __main__:run:179 - Saving features to parquet…
+2026-05-24 00:46:04.034 | INFO     | __main__:run:206 - Saved: train_features.parquet (1,600,000 rows × 36 cols), test_features.parquet (400,000 rows)
+2026-05-24 00:46:04.490 | INFO     | __main__:run:244 - MLflow run logged: 632baafe5fd7434fa549515b5b5349cc
+2026-05-24 00:46:04.491 | INFO     | __main__:run:247 - Feature engineering complete in 16.8s
+2026-05-24 00:48:18.721 | INFO     | __main__:run:91 - Loading raw data  (dataset=moroccan) …
+2026-05-24 00:48:23.560 | INFO     | __main__:run:114 - Moroccan split  train=1,600,000  test=400,000  (4.8s)
+2026-05-24 00:48:23.561 | INFO     | __main__:run:137 - Fitting FeaturePipeline on train…
+2026-05-24 00:48:28.454 | INFO     | __main__:run:153 - Pipeline fit complete (4.9s)
+2026-05-24 00:48:28.455 | INFO     | __main__:run:156 - Transforming test set…
+2026-05-24 00:48:29.010 | INFO     | __main__:run:162 - Final feature count: 36
+2026-05-24 00:48:34.080 | INFO     | __main__:run:170 - 
+                   null_rate  pct_zero  spearman_with_churn
+is_inactive              0.0  0.896984               0.2719
+regularity_rate          0.0  0.000000              -0.2062
+TOP_PACK_missing         0.0  0.716694               0.2013
+top_pack_te              0.0  0.000000               0.1599
+top_pack_freq            0.0  0.000000               0.1594
+FREQUENCE_RECH           0.0  0.000000               0.0652
+total_calls              0.0  0.092384               0.0526
+REVENUE                  0.0  0.000000               0.0444
+FREQ_TOP_PACK            0.0  0.422841               0.0342
+ON_NET                   0.0  0.397801               0.0337
+MONTANT                  0.0  0.000000               0.0316
+recharge_per_freq        0.0  0.000000              -0.0203
+TIGO                     0.0  0.623474               0.0181
+revenue_per_freq         0.0  0.000000               0.0172
+ORANGE                   0.0  0.427211               0.0155
+2026-05-24 00:48:34.081 | INFO     | __main__:run:179 - Saving features to parquet…
+2026-05-24 00:48:35.634 | INFO     | __main__:run:206 - Saved: train_features.parquet (1,600,000 rows × 36 cols), test_features.parquet (400,000 rows)
+2026-05-24 00:48:35.634 | INFO     | __main__:run:247 - Feature engineering complete in 16.9s
+2026-05-24 00:48:58.897 | INFO     | __main__:train:289 - Features loaded: 1,600,000 rows × 36 cols  churn rate=2.700%
+2026-05-24 00:48:58.899 | INFO     | __main__:train:302 - Class ratio: 1556800 neg / 43200 pos  scale_pos_weight=36.04
+2026-05-24 00:48:58.900 | INFO     | __main__:train:321 - CV scoring logistic_regression…
+2026-05-24 00:49:03.020 | DEBUG    | __main__:_cv_score:236 -   [logistic_regression] fold 1: ROC-AUC=0.8800  PR-AUC=0.2000
+2026-05-24 00:49:07.140 | DEBUG    | __main__:_cv_score:236 -   [logistic_regression] fold 2: ROC-AUC=0.8797  PR-AUC=0.2002
+2026-05-24 00:49:10.081 | DEBUG    | __main__:_cv_score:236 -   [logistic_regression] fold 3: ROC-AUC=0.8774  PR-AUC=0.1967
+2026-05-24 00:49:13.871 | DEBUG    | __main__:_cv_score:236 -   [logistic_regression] fold 4: ROC-AUC=0.8776  PR-AUC=0.1991
+2026-05-24 00:49:16.786 | DEBUG    | __main__:_cv_score:236 -   [logistic_regression] fold 5: ROC-AUC=0.8761  PR-AUC=0.1934
+2026-05-24 00:49:16.787 | INFO     | __main__:_cv_score:250 - [logistic_regression] CV ROC-AUC=0.8782 ± 0.0015  PR-AUC=0.1979  (17.9s)
+2026-05-24 00:49:16.791 | INFO     | __main__:train:321 - CV scoring xgboost…
+2026-05-24 00:49:33.270 | DEBUG    | __main__:_cv_score:236 -   [xgboost] fold 1: ROC-AUC=0.8975  PR-AUC=0.2354
+2026-05-24 00:49:59.452 | DEBUG    | __main__:_cv_score:236 -   [xgboost] fold 2: ROC-AUC=0.8987  PR-AUC=0.2330
+2026-05-24 00:50:25.666 | DEBUG    | __main__:_cv_score:236 -   [xgboost] fold 3: ROC-AUC=0.8958  PR-AUC=0.2296
+2026-05-24 00:50:45.714 | DEBUG    | __main__:_cv_score:236 -   [xgboost] fold 4: ROC-AUC=0.8959  PR-AUC=0.2297
+2026-05-24 00:51:07.033 | DEBUG    | __main__:_cv_score:236 -   [xgboost] fold 5: ROC-AUC=0.8936  PR-AUC=0.2221
+2026-05-24 00:51:07.035 | INFO     | __main__:_cv_score:250 - [xgboost] CV ROC-AUC=0.8963 ± 0.0017  PR-AUC=0.2300  (110.2s)
+2026-05-24 00:51:07.039 | INFO     | __main__:train:321 - CV scoring lightgbm…
+2026-05-24 00:51:10.709 | DEBUG    | __main__:_cv_score:236 -   [lightgbm] fold 1: ROC-AUC=0.8860  PR-AUC=0.2029
+2026-05-24 00:51:14.327 | DEBUG    | __main__:_cv_score:236 -   [lightgbm] fold 2: ROC-AUC=0.8856  PR-AUC=0.1948
+2026-05-24 00:51:17.820 | DEBUG    | __main__:_cv_score:236 -   [lightgbm] fold 3: ROC-AUC=0.8829  PR-AUC=0.1927
+2026-05-24 00:51:21.383 | DEBUG    | __main__:_cv_score:236 -   [lightgbm] fold 4: ROC-AUC=0.8830  PR-AUC=0.1904
+2026-05-24 00:51:24.845 | DEBUG    | __main__:_cv_score:236 -   [lightgbm] fold 5: ROC-AUC=0.8827  PR-AUC=0.1895
+2026-05-24 00:51:24.846 | INFO     | __main__:_cv_score:250 - [lightgbm] CV ROC-AUC=0.8841 ± 0.0015  PR-AUC=0.1941  (17.8s)
+2026-05-24 00:51:24.850 | INFO     | __main__:train:321 - CV scoring catboost…
+2026-05-24 00:52:24.547 | DEBUG    | __main__:_cv_score:236 -   [catboost] fold 1: ROC-AUC=0.8973  PR-AUC=0.2352
+2026-05-24 00:53:23.456 | DEBUG    | __main__:_cv_score:236 -   [catboost] fold 2: ROC-AUC=0.8984  PR-AUC=0.2320
+2026-05-24 00:55:35.679 | DEBUG    | __main__:_cv_score:236 -   [catboost] fold 3: ROC-AUC=0.8956  PR-AUC=0.2287
+2026-05-24 00:57:38.253 | DEBUG    | __main__:_cv_score:236 -   [catboost] fold 4: ROC-AUC=0.8957  PR-AUC=0.2296
+2026-05-24 01:02:21.667 | DEBUG    | __main__:_cv_score:236 -   [catboost] fold 5: ROC-AUC=0.8936  PR-AUC=0.2206
+2026-05-24 01:02:21.672 | INFO     | __main__:_cv_score:250 - [catboost] CV ROC-AUC=0.8961 ± 0.0016  PR-AUC=0.2292  (656.8s)
+2026-05-24 01:02:21.702 | INFO     | __main__:train:327 - 
+Best model: xgboost  ROC-AUC=0.8963 ± 0.0017
+2026-05-24 01:02:21.703 | INFO     | __main__:train:333 - Refitting xgboost on full training set…
+2026-05-24 01:06:26.181 | INFO     | __main__:train:337 - Refit complete (244.5s)
+2026-05-24 01:06:26.227 | INFO     | __main__:train:367 - Saved: /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/models/best_model.pkl  /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/models/training_manifest.json
+2026-05-24 01:06:27.701 | INFO     | __main__:train:399 - MLflow run: 0d1c570c50b74167904809b4601c18ed
+2026-05-24 01:13:56.339 | INFO     | __main__:tune:192 - Full dataset: 1,600,000 rows × 36 cols  churn=2.700%
+2026-05-24 01:13:56.464 | INFO     | __main__:tune:213 - Optuna sample: 400,000 rows  churn=2.700%  (3-fold CV)
+2026-05-24 01:13:56.465 | INFO     | __main__:tune:227 - Starting Optuna search: 50 trials…
+2026-05-24 02:10:01.009 | INFO     | __main__:tune:237 - Search complete in 56.1 min  best trial #32  sample CV ROC-AUC=0.8942
+2026-05-24 02:10:01.011 | INFO     | __main__:tune:254 - Validating best params on full dataset (5-fold CV)…
+2026-05-24 02:17:08.772 | INFO     | __main__:tune:264 - Full CV ROC-AUC = 0.8957 ± 0.0015  (7.1 min)
+2026-05-24 02:17:08.799 | INFO     | __main__:_patch_config:159 - configs/base.yaml catboost section updated → /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/configs/base.yaml
+2026-05-24 02:17:08.799 | INFO     | __main__:tune:292 - Tuning results saved → /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/models/tuning_results.json
+2026-05-24 02:17:08.799 | INFO     | __main__:tune:295 - Refitting tuned CatBoost on full training data…
+2026-05-24 02:19:00.727 | INFO     | __main__:tune:300 - Refit complete (1.9 min)
+2026-05-24 02:19:00.966 | INFO     | __main__:tune:310 - best_model.pkl updated → /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/models/best_model.pkl
+2026-05-24 02:19:00.967 | INFO     | __main__:tune:339 - 
+=======================================================
+  Tuning summary
+=======================================================
+  Trials run      : 50  (15 pruned)
+  Best trial #    : 32
+  Sample CV AUC   : 0.8942
+  Full CV AUC     : 0.8957 ± 0.0015
+=======================================================
+2026-05-24 02:39:05.128 | INFO     | __main__:tune:257 - Full dataset: 1,600,000 rows × 36 cols  churn=2.700%  model=xgboost
+2026-05-24 02:39:05.279 | INFO     | __main__:tune:278 - Optuna sample: 400,000 rows  churn=2.700%  (3-fold CV)
+2026-05-24 02:39:05.280 | INFO     | __main__:tune:292 - Starting Optuna search: 50 trials…
+2026-05-24 03:10:46.215 | INFO     | __main__:tune:304 - Search complete in 31.7 min  best trial #23  sample CV ROC-AUC=0.8959
+2026-05-24 03:10:46.216 | INFO     | __main__:tune:333 - Validating best params on full dataset (5-fold CV)…
+2026-05-24 03:14:07.931 | INFO     | __main__:tune:344 - Full CV ROC-AUC = 0.8972 ± 0.0014  (3.4 min)
+2026-05-24 03:14:07.949 | INFO     | __main__:_patch_config:217 - configs/base.yaml xgboost section updated → /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/configs/base.yaml
+2026-05-24 03:14:07.949 | INFO     | __main__:tune:372 - Tuning results saved → /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/models/tuning_results_xgboost.json
+2026-05-24 03:14:07.949 | INFO     | __main__:tune:375 - Refitting tuned xgboost on full training data…
+2026-05-24 03:14:37.138 | INFO     | __main__:tune:386 - Refit complete (0.5 min)
+2026-05-24 03:14:37.166 | INFO     | __main__:tune:396 - best_model.pkl updated → /Users/apple/Desktop/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline/models/best_model.pkl
+2026-05-24 03:14:37.166 | INFO     | __main__:tune:425 - 
+=======================================================
+  Tuning summary
+=======================================================
+  Trials run      : 50  (21 pruned)
+  Best trial #    : 23
+  Sample CV AUC   : 0.8959
+  Full CV AUC     : 0.8972 ± 0.0014
+=======================================================
