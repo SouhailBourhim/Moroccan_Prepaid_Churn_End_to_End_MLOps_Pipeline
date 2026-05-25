@@ -35,8 +35,8 @@ from src.api.schemas import (
     LogsSummary,
     PredictionRequest,
     PredictionResponse,
-    RecentPrediction,
     ReadyResponse,
+    RecentPrediction,
     SubscriberFeatures,
     SubscriberPrediction,
 )
@@ -139,7 +139,10 @@ def get_pred_logger() -> PredictionLogger:
 def get_drift_detector() -> DriftDetector:
     detector: DriftDetector | None = getattr(app.state, "drift_detector", None)
     if detector is None:
-        raise HTTPException(status_code=503, detail="Drift detector not initialised — model artifacts required.")
+        raise HTTPException(
+            status_code=503,
+            detail="Drift detector not initialised — model artifacts required.",
+        )
     return detector
 
 

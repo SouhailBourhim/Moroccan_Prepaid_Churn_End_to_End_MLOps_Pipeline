@@ -65,11 +65,11 @@ class CalibratedChurnModel:
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         raw: np.ndarray = self.base_model.predict_proba(X)[:, 1]
         if self.method == "sigmoid":
-            cal: np.ndarray = self.calibrator.predict_proba(  # type: ignore[union-attr]
+            cal: np.ndarray = self.calibrator.predict_proba(
                 raw.reshape(-1, 1)
             )[:, 1]
         else:
-            cal = self.calibrator.predict(raw)  # type: ignore[union-attr]
+            cal = self.calibrator.predict(raw)
         return np.column_stack([1.0 - cal, cal])
 
     def __repr__(self) -> str:
@@ -190,10 +190,10 @@ def run(
         logger.info(f"Fitting {m} calibrator on {len(y_cal):,} samples …")
         if m == "isotonic":
             cal_obj: IsotonicRegression | LogisticRegression = _fit_isotonic(raw_cal, y_cal)
-            cal_probs: np.ndarray = cal_obj.predict(raw_test)  # type: ignore[union-attr]
+            cal_probs: np.ndarray = cal_obj.predict(raw_test)
         else:
             cal_obj = _fit_sigmoid(raw_cal, y_cal)
-            cal_probs = cal_obj.predict_proba(raw_test.reshape(-1, 1))[:, 1]  # type: ignore[union-attr]
+            cal_probs = cal_obj.predict_proba(raw_test.reshape(-1, 1))[:, 1]
         metrics_m = compute_metrics(y_test, cal_probs)
         brier_by_method[m] = metrics_m["brier"]
         logger.info(
@@ -301,7 +301,7 @@ def run(
             if active is not None:
                 logger.info(f"MLflow run: {active.info.run_id}")
 
-    return out_metrics  # type: ignore[return-value]
+    return out_metrics
 
 
 def _parse_args() -> argparse.Namespace:

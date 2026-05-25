@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 from loguru import logger as _log
 
@@ -82,7 +83,7 @@ class PredictionLogger:
         Errors are swallowed and logged — a DB failure must never fail a
         prediction response.
         """
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         try:
             with self._connect() as conn:
                 conn.execute(
@@ -93,7 +94,8 @@ class PredictionLogger:
                 )
                 conn.executemany(
                     "INSERT INTO prediction_rows "
-                    "(request_id, subscriber_idx, churn_probability, churn_prediction, features_json) "
+                    "(request_id, subscriber_idx, churn_probability,"
+                    " churn_prediction, features_json) "
                     "VALUES (?, ?, ?, ?, ?)",
                     [
                         (request_id, i, float(p), int(pred), json.dumps(raw))
@@ -108,7 +110,7 @@ class PredictionLogger:
     def summary(self, since_hours: int = 24) -> dict[str, Any]:
         """Return aggregate stats across all logged predictions."""
         since = (
-            datetime.now(timezone.utc) - timedelta(hours=since_hours)
+            datetime.now(UTC) - timedelta(hours=since_hours)
         ).isoformat()
         with self._connect() as conn:
             total_preds: int = conn.execute(

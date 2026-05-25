@@ -16,16 +16,18 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install lint deps
-        # Install the package (so mypy can resolve internal imports) plus
-        # the required type stubs. Heavy ML deps (catboost, xgboost…) are
-        # excluded here via --no-deps on the package itself; mypy only needs
-        # the source tree, not the compiled extensions.
+        # Install only the lightweight runtime subset the linter and type
+        # checker actually need. Heavy compiled extensions (catboost, xgboost,
+        # lightgbm, dvc, shap, optuna) are excluded; mypy resolves those via
+        # ignore_missing_imports = true in pyproject.toml.
         run: |
           pip install ruff mypy types-PyYAML
           pip install --no-deps -e .
-          pip install pandas numpy scikit-learn fastapi pydantic loguru joblib mlflow pyyaml
+          pip install \
+            pandas numpy scikit-learn scipy \
+            fastapi pydantic loguru joblib mlflow pyyaml pyarrow
       - name: Lint
-        run: ruff check src/
+        run: ruff check src/ tests/
       - name: Type check
         run: mypy src/
 

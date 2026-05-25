@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -176,7 +177,7 @@ class DriftDetector:
         if not self.pred_db.exists():
             return []
         since = (
-            datetime.now(timezone.utc) - timedelta(hours=since_hours)
+            datetime.now(UTC) - timedelta(hours=since_hours)
         ).isoformat()
         with self._db_connect() as conn:
             rows = conn.execute(
@@ -193,7 +194,7 @@ class DriftDetector:
         min_samples: int = MIN_LIVE_DEFAULT,
     ) -> DriftReport:
         """Run drift detection over the last `hours` of prediction traffic."""
-        report_time = datetime.now(timezone.utc).isoformat()
+        report_time = datetime.now(UTC).isoformat()
         raw_inputs = self._fetch_live_raw(hours)
         n_live = len(raw_inputs)
 

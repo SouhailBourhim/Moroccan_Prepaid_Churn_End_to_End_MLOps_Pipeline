@@ -170,7 +170,7 @@ def run(dataset: str = "expresso", use_mlflow: bool = True) -> dict[str, float]:
             mlflow.log_param("model_name", artifact.get("model", "unknown").__class__.__name__)
             for key, val in metrics.items():
                 if key not in ("holdout_size", "churn_rate", "dataset"):
-                    mlflow.log_metric(key, val)  # type: ignore[arg-type]
+                    mlflow.log_metric(key, val)
             mlflow.log_artifact(str(out), "evaluation")
 
             active = mlflow.active_run()
