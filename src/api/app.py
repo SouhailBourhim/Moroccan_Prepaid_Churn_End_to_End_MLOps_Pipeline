@@ -27,6 +27,8 @@ from loguru import logger
 from src.api.dependencies import ModelArtifacts, load_artifacts
 from src.api.logger import PredictionLogger
 from src.api.schemas import (
+    DriftResponse,
+    FeatureDriftResult,
     HealthResponse,
     InfoResponse,
     LogsResponse,
@@ -38,6 +40,7 @@ from src.api.schemas import (
     SubscriberFeatures,
     SubscriberPrediction,
 )
+from src.monitoring.drift import DriftDetector, DriftReport
 from src.utils.logging import setup_logger
 
 ROOT = Path(__file__).parents[2]
@@ -69,9 +72,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.pred_logger = PredictionLogger(PREDICTIONS_DB)
     logger.info(f"Prediction logger ready → {PREDICTIONS_DB}")
 
+    if app.state.artifacts is not None:
+        art = app.state.artifacts
+        app.state.drift_detector = DriftDetector(
+            pipeline=art.pipeline,
+            feature_cols=art.feature_cols,
+            features_dir=FEATURES_DIR,
+            pred_db=PREDICTIONS_DB,
+        )
+        logger.info("Drift detector ready")
+    else:
+        app.state.drift_detector = None
+
     yield
 
     app.state.artifacts = None
+    app.state.drift_detector = None
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -119,8 +135,16 @@ def get_pred_logger() -> PredictionLogger:
     return app.state.pred_logger  # type: ignore[no-any-return]
 
 
+def get_drift_detector() -> DriftDetector:
+    detector: DriftDetector | None = getattr(app.state, "drift_detector", None)
+    if detector is None:
+        raise HTTPException(status_code=503, detail="Drift detector not initialised — model artifacts required.")
+    return detector
+
+
 ArtifactsDep = Annotated[ModelArtifacts, Depends(get_artifacts)]
 LoggerDep = Annotated[PredictionLogger, Depends(get_pred_logger)]
+DriftDep = Annotated[DriftDetector, Depends(get_drift_detector)]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -224,6 +248,41 @@ def predict(
         model_name=model_name,
         threshold=request.threshold,
         n_subscribers=len(predictions),
+    )
+
+
+@app.get("/drift", response_model=DriftResponse, tags=["monitoring"])
+def drift(
+    detector: DriftDep,
+    hours: int = Query(default=24, ge=1, le=720, description="Look-back window in hours"),
+    min_samples: int = Query(default=50, ge=1, description="Minimum live rows required"),
+) -> DriftResponse:
+    """Return per-feature drift status comparing recent /predict traffic to training baseline.
+
+    Uses PSI (Population Stability Index) and KS 2-sample test.
+    Returns overall_status='INSUFFICIENT_DATA' when fewer than min_samples rows
+    have been logged in the requested window.
+    """
+    report: DriftReport = detector.detect(hours=hours, min_samples=min_samples)
+    return DriftResponse(
+        report_time=report.report_time,
+        window_hours=report.window_hours,
+        n_live_predictions=report.n_live_predictions,
+        n_features_checked=report.n_features_checked,
+        n_drifted=report.n_drifted,
+        n_warned=report.n_warned,
+        overall_status=report.overall_status,
+        features=[
+            FeatureDriftResult(
+                feature=f.feature,
+                psi=f.psi,
+                ks_statistic=f.ks_statistic,
+                ks_pvalue=f.ks_pvalue,
+                status=f.status,
+                n_live=f.n_live,
+            )
+            for f in report.features
+        ],
     )
 
 

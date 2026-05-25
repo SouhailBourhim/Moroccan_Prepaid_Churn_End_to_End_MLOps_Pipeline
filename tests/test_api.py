@@ -14,9 +14,10 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.app import app, get_artifacts, get_pred_logger
+from src.api.app import app, get_artifacts, get_drift_detector, get_pred_logger
 from src.api.dependencies import ModelArtifacts
 from src.api.logger import PredictionLogger
+from src.monitoring.drift import DriftDetector, DriftReport, FeatureDriftResult
 
 # ── Mock artifacts ────────────────────────────────────────────────────────────
 
@@ -60,6 +61,43 @@ MOCK_ARTIFACTS = ModelArtifacts(
     manifest=MOCK_MANIFEST,
 )
 
+class _MockDriftDetector:
+    """Returns a canned DriftReport without touching disk or the pipeline."""
+
+    def __init__(self, report: DriftReport) -> None:
+        self._report = report
+
+    def detect(self, hours: int = 24, min_samples: int = 50) -> DriftReport:
+        return self._report
+
+
+_OK_REPORT = DriftReport(
+    report_time="2026-05-25T00:00:00+00:00",
+    window_hours=24,
+    n_live_predictions=200,
+    n_features_checked=3,
+    n_drifted=0,
+    n_warned=0,
+    overall_status="OK",
+    features=[
+        FeatureDriftResult(
+            feature="regularity_rate", psi=0.02, ks_statistic=0.04,
+            ks_pvalue=0.45, status="OK", n_live=200,
+        ),
+    ],
+)
+
+_INSUFFICIENT_REPORT = DriftReport(
+    report_time="2026-05-25T00:00:00+00:00",
+    window_hours=24,
+    n_live_predictions=5,
+    n_features_checked=0,
+    n_drifted=0,
+    n_warned=0,
+    overall_status="INSUFFICIENT_DATA",
+    features=[],
+)
+
 VALID_SUBSCRIBER: dict[str, Any] = {
     "REGION": "DAKAR",
     "TENURE": "K > 24 month",
@@ -82,9 +120,11 @@ def tmp_logger() -> PredictionLogger:
 
 @pytest.fixture
 def client(tmp_logger: PredictionLogger) -> TestClient:
-    """TestClient with mock artifacts and a temp prediction logger."""
+    """TestClient with mock artifacts, temp prediction logger, and mock drift detector."""
+    mock_detector = _MockDriftDetector(_OK_REPORT)
     app.dependency_overrides[get_artifacts] = lambda: MOCK_ARTIFACTS
     app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
+    app.dependency_overrides[get_drift_detector] = lambda: mock_detector
     c = TestClient(app, raise_server_exceptions=True)
     yield c  # type: ignore[misc]
     app.dependency_overrides.clear()
@@ -95,11 +135,15 @@ def unready_client(tmp_logger: PredictionLogger) -> TestClient:
     """TestClient with NO artifacts — simulates startup failure."""
     from fastapi import HTTPException
 
-    def _raise() -> ModelArtifacts:
+    def _raise_model() -> ModelArtifacts:
         raise HTTPException(status_code=503, detail="Model artifacts not loaded.")
 
-    app.dependency_overrides[get_artifacts] = _raise
+    def _raise_drift() -> DriftDetector:
+        raise HTTPException(status_code=503, detail="Drift detector not initialised.")
+
+    app.dependency_overrides[get_artifacts] = _raise_model
     app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
+    app.dependency_overrides[get_drift_detector] = _raise_drift
     c = TestClient(app, raise_server_exceptions=False)
     yield c  # type: ignore[misc]
     app.dependency_overrides.clear()
@@ -219,6 +263,39 @@ def test_logs_empty_on_fresh_db(client: TestClient) -> None:
     assert body["summary"]["total_predictions"] == 0
     assert body["summary"]["total_requests"] == 0
     assert body["recent"] == []
+
+
+# ── /drift ────────────────────────────────────────────────────────────────────
+
+
+def test_drift_returns_ok_report(client: TestClient) -> None:
+    r = client.get("/drift")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["overall_status"] == "OK"
+    assert body["n_drifted"] == 0
+    assert body["n_live_predictions"] == 200
+    assert len(body["features"]) == 1
+    assert body["features"][0]["feature"] == "regularity_rate"
+
+
+def test_drift_insufficient_data(client: TestClient) -> None:
+    # Override drift detector to return INSUFFICIENT_DATA report
+    insufficient_detector = _MockDriftDetector(_INSUFFICIENT_REPORT)
+    app.dependency_overrides[get_drift_detector] = lambda: insufficient_detector
+    r = client.get("/drift")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["overall_status"] == "INSUFFICIENT_DATA"
+    assert body["features"] == []
+    assert body["n_live_predictions"] == 5
+    # restore
+    app.dependency_overrides[get_drift_detector] = lambda: _MockDriftDetector(_OK_REPORT)
+
+
+def test_drift_503_when_model_missing(unready_client: TestClient) -> None:
+    r = unready_client.get("/drift")
+    assert r.status_code == 503
 
 
 def test_logs_records_predict_calls(client: TestClient) -> None:

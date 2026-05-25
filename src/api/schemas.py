@@ -119,3 +119,23 @@ class RecentPrediction(BaseModel):
 class LogsResponse(BaseModel):
     summary: LogsSummary
     recent: list[RecentPrediction]
+
+
+class FeatureDriftResult(BaseModel):
+    feature: str
+    psi: float
+    ks_statistic: float
+    ks_pvalue: float
+    status: str   # "OK" | "WARN" | "DRIFT"
+    n_live: int
+
+
+class DriftResponse(BaseModel):
+    report_time: str
+    window_hours: int
+    n_live_predictions: int
+    n_features_checked: int
+    n_drifted: int
+    n_warned: int
+    overall_status: str   # "OK" | "WARN" | "DRIFT" | "INSUFFICIENT_DATA"
+    features: list[FeatureDriftResult]
