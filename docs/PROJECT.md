@@ -37,15 +37,16 @@ The project currently includes:
 - leak-aware sklearn-compatible feature engineering pipeline with `--dataset {expresso,moroccan}` flag
 - candidate training for Logistic Regression, XGBoost, LightGBM, and CatBoost
 - Optuna tuning for CatBoost and XGBoost via `--model {catboost,xgboost}` flag
-- deterministic holdout evaluation and DVC-tracked metrics
-- FastAPI serving with `/health`, `/ready`, `/info`, and `/predict`
+- deterministic holdout evaluation with `--dataset moroccan` flag and DVC-tracked metrics
+- post-hoc isotonic calibration (`src/models/calibrate.py`) — reduces Moroccan XGBoost Brier from 0.1273 to 0.0227
+- FastAPI serving (v1.1.0) with `/health`, `/ready`, `/info`, `/predict`, `/logs`, and `/drift`
+- SQLite-backed `PredictionLogger` (`src/api/logger.py`) persisting every `/predict` call in WAL mode
+- `DriftDetector` (`src/monitoring/drift.py`) comparing live inputs against training baseline using PSI and KS 2-sample test
 - Dockerized API runtime with external model and feature artifacts
 - MLflow experiment logging for feature engineering, training, and tuning
-- CI checks for linting, typing, and tests
-- React operations dashboard in `dashboard/`
-- production-hardening fixes for final refit, threshold selection, feature drift checks, and config-driven feature parameters
-
-The next production milestone is not another model algorithm. It is the monitoring and feedback loop: prediction logging, drift detection, delayed-label evaluation, and retraining/promotion automation.
+- CI checks for linting, typing, and tests (53 backend tests)
+- React operations dashboard in `dashboard/` including live Monitoring and Drift panels wired to the API
+- production-hardening fixes for final refit, threshold selection, config-driven feature parameters
 
 ---
 
@@ -179,8 +180,11 @@ Casablanca, Rabat, Fès, Marrakech, Tanger, Agadir, Meknès, Oujda, Laâyoune, B
 │
 ├── models/                        # DVC-tracked train stage outputs
 │   ├── best_model.pkl             # {model: CatBoostClassifier, feature_cols: [...]}
+│   ├── best_model_calibrated.pkl  # CalibratedChurnModel (isotonic; gitignored)
 │   ├── training_manifest.json     # CV results for all 4 candidates (DVC metric)
-│   ├── eval_metrics.json          # Holdout metrics (DVC metric)
+│   ├── eval_metrics.json          # Expresso holdout metrics (DVC metric)
+│   ├── eval_metrics_moroccan.json            # Moroccan holdout metrics (uncalibrated)
+│   ├── eval_metrics_moroccan_calibrated.json # Moroccan calibration before/after
 │   ├── tuning_results.json        # CatBoost Optuna best params
 │   └── tuning_results_xgboost.json  # XGBoost Optuna best params
 │
@@ -195,12 +199,16 @@ Casablanca, Rabat, Fès, Marrakech, Tanger, Agadir, Meknès, Oujda, Laâyoune, B
 │   │   ├── train.py               # 4-candidate CV training entry point
 │   │   ├── tune.py                # Optuna search: --model {catboost,xgboost}
 │   │   ├── evaluate.py            # Metric utils, threshold selection, SHAP
-│   │   ├── evaluate_run.py        # DVC evaluate stage entry point
+│   │   ├── evaluate_run.py        # DVC evaluate stage: --dataset {expresso,moroccan}
+│   │   ├── calibrate.py           # Post-hoc calibration: CalibratedChurnModel (isotonic/sigmoid)
 │   │   └── predict.py             # CLI inference on raw CSV
 │   ├── api/
-│   │   ├── app.py                 # FastAPI app — routes, lifespan, dependency
-│   │   ├── schemas.py             # Pydantic request/response models
-│   │   └── dependencies.py        # ModelArtifacts + load_artifacts()
+│   │   ├── app.py                 # FastAPI app v1.1.0 — /predict /logs /drift /info /health /ready
+│   │   ├── schemas.py             # Pydantic request/response models (incl. LogsResponse, DriftResponse)
+│   │   ├── dependencies.py        # ModelArtifacts + load_artifacts()
+│   │   └── logger.py              # PredictionLogger: SQLite WAL, log_request/summary/recent
+│   ├── monitoring/
+│   │   └── drift.py               # DriftDetector: PSI + KS 2-sample test vs training baseline
 │   └── utils/
 │       └── logging.py             # loguru setup
 │
@@ -216,7 +224,7 @@ Casablanca, Rabat, Fès, Marrakech, Tanger, Agadir, Meknès, Oujda, Laâyoune, B
 ├── tests/
 │   ├── test_features.py           # 18 tests — every transformer + pipeline
 │   ├── test_models.py             # 16 tests — evaluate utilities, build_candidates, tune
-│   └── test_api.py                # 14 tests — all endpoints + 503/422 cases
+│   └── test_api.py                # 19 tests — all endpoints + 503/422 cases + logs + drift
 │
 ├── notebooks/
 │   ├── 01_eda.ipynb               # Expresso EDA
@@ -584,16 +592,45 @@ Evaluated on a **deterministic 20% stratified holdout** (430,810 rows) — same 
 
 PR-AUC of 0.7071 vs a random baseline of 0.1875 means the model is ~3.8× more precise than random at any given recall level.
 
-### 9.2 Moroccan Synthetic Results (CV, no dedicated holdout eval)
+### 9.2 Moroccan Synthetic Results
 
-The Moroccan pipeline uses an 80/20 stratified split for feature engineering and CV. Optuna best results:
+The Moroccan pipeline uses an 80/20 stratified split. Optuna CV results:
 
 | Model | Full CV ROC-AUC | Full CV std |
 |-------|----------------|------------|
 | XGBoost (tuned) | **0.8972** | 0.0014 |
 | CatBoost (tuned) | 0.8957 | 0.0015 |
 
-A formal holdout evaluation pass (equivalent to `evaluate_run.py`) on the Moroccan 20% split is a natural next step.
+**Holdout evaluation** (`evaluate_run.py --dataset moroccan`, 400,000 rows, 2.7% churn):
+
+| Metric | Uncalibrated | Calibrated (isotonic) |
+|--------|--------------|-----------------------|
+| ROC-AUC | 0.8965 | 0.8963 |
+| PR-AUC | 0.2319 | 0.2312 |
+| Brier score | 0.1273 | **0.0227** |
+| Baseline Brier (predict mean) | — | 0.0263 |
+
+XGBoost trained with `scale_pos_weight=36` (inverse of 2.7% churn rate) produces inflated probabilities: uncalibrated Brier 0.1273 vs baseline 0.0263. Isotonic calibration (`src/models/calibrate.py`) reduces this to 0.0227 — better than the no-skill baseline — while leaving ROC-AUC virtually unchanged (rank order is not affected, only probability scale).
+
+The calibrated model uses the Youden-J optimal threshold, which shifts from 0.486 (uncalibrated) to 0.033 (calibrated) due to the rescaled probabilities.
+
+### 9.5 Post-Hoc Calibration (`src/models/calibrate.py`)
+
+When a model's predicted probabilities are miscalibrated — as with XGBoost trained on severe class imbalance — isotonic regression (or Platt scaling) can correct the scale without affecting ranking.
+
+**Implementation:**
+
+```python
+class CalibratedChurnModel:
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        raw = self.base_model.predict_proba(X)[:, 1]
+        calibrated = self.calibrator.predict(raw)   # isotonic
+        return np.column_stack([1.0 - calibrated, calibrated])
+```
+
+Calibration split: 20% of `train_features.parquet` with a different random seed (123) than the holdout split (42), preventing leakage between calibration fitting and holdout evaluation. Both isotonic and sigmoid (Platt) are fitted; the one with the lower Brier score on the test split is saved as `best_model_calibrated.pkl`.
+
+sklearn 1.8+ removed `cv="prefit"` from `CalibratedClassifierCV`. The implementation uses `IsotonicRegression(out_of_bounds="clip")` and `LogisticRegression` directly instead of the sklearn wrapper.
 
 ### 9.3 Threshold Analysis
 
@@ -700,34 +737,29 @@ Without a remote, artifacts are cached locally in `.dvc/cache/`.
 HTTP Request
     │
     ▼
-FastAPI (src/api/app.py)
+FastAPI v1.1.0 (src/api/app.py)
     │
-    ├── GET /health    → HealthResponse {status: "ok"}
-    ├── GET /ready     → ReadyResponse | 503 if model not loaded
-    ├── GET /info      → InfoResponse {model_name, cv_roc_auc_mean, n_features, …}
-    └── POST /predict  → PredictionResponse
+    ├── GET  /health    → HealthResponse {status: "ok"}
+    ├── GET  /ready     → ReadyResponse | 503 if model not loaded
+    ├── GET  /info      → InfoResponse {model_name, cv_roc_auc_mean, n_features, …}
+    ├── GET  /logs      → LogsResponse  {summary, recent[]}   ← prediction log
+    ├── GET  /drift     → DriftResponse {overall_status, features[]}  ← drift report
+    └── POST /predict   → PredictionResponse
              │
-             ▼
-    _to_dataframe(subscribers)    ← typed pandas DataFrame with correct dtypes
-             │
-             ▼
-    FeaturePipeline.transform()   ← loaded once at startup, thread-safe
-             │
-             ▼
-    model.predict_proba()         ← best model (CatBoost or XGBoost)
-             │
-             ▼
-    [{churn_probability, churn_prediction}, …]
+             ├─ _to_dataframe()          typed pandas DataFrame
+             ├─ FeaturePipeline.transform()
+             ├─ model.predict_proba()
+             ├─ PredictionLogger.log_request()  ← async-safe SQLite write
+             └─ [{churn_probability, churn_prediction}, …]
 ```
 
 ### 11.2 Startup
 
-On startup (via FastAPI `lifespan`), `load_artifacts()` is called once:
-- Loads `data/features/feature_pipeline.pkl` (FeaturePipeline fitted on train)
-- Loads `models/best_model.pkl` (classifier + feature_cols)
-- Loads `models/training_manifest.json` (metrics for `/info`)
+On startup (via FastAPI `lifespan`), the following are initialised once:
 
-If artifact files are missing, startup logs a warning and sets `app.state.artifacts = None`. All endpoints requiring the model return HTTP 503 until artifacts are available.
+1. `load_artifacts()` — loads `feature_pipeline.pkl`, `best_model.pkl`, `training_manifest.json` into `app.state.artifacts`. If missing, sets to `None` and returns 503 on model-dependent endpoints.
+2. `PredictionLogger(PREDICTIONS_DB)` — creates `data/predictions.db` with WAL mode and two tables (`prediction_requests`, `prediction_rows`). Always succeeds — the DB is local dev state.
+3. `DriftDetector(pipeline, feature_cols, features_dir, pred_db)` — only created when artifacts are present. Precomputes per-feature PSI bin edges from a 10k-row sample of `train_features.parquet` at startup (fast; ~200 ms). Only initialised when artifacts are loaded.
 
 ### 11.3 Request/Response Schema
 
@@ -768,7 +800,47 @@ Pydantic enforces:
 - `REGULARITY`: float in [0, 90] (only field with domain bounds)
 - All other subscriber fields: optional, any float or null
 
-### 11.5 Running
+### 11.5 Prediction Logging (`src/api/logger.py`)
+
+Every `/predict` call is persisted to `data/predictions.db` (SQLite, WAL mode) via `PredictionLogger.log_request()`. Errors are swallowed — DB failure never causes a prediction response to fail.
+
+**Schema:**
+
+```sql
+-- One row per request
+prediction_requests (request_id TEXT PK, ts TEXT, model_name TEXT,
+                     n_subscribers INT, threshold REAL, latency_ms REAL)
+
+-- One row per scored subscriber
+prediction_rows (id INTEGER PK, request_id TEXT FK, subscriber_idx INT,
+                 churn_probability REAL, churn_prediction INT, features_json TEXT)
+```
+
+`GET /logs?hours=24&limit=50` returns:
+- `summary`: total_predictions, total_requests, mean_churn_probability, churn_flag_rate, mean_latency_ms for the time window
+- `recent`: the `limit` most recent prediction rows with subscriber-level detail
+
+### 11.6 Feature Drift Detection (`src/monitoring/drift.py`)
+
+`DriftDetector` compares live `/predict` input distributions against the training baseline using two metrics:
+
+| Metric | Threshold | Status |
+|--------|-----------|--------|
+| PSI | < 0.1 | OK |
+| PSI | 0.1–0.2 | WARN |
+| PSI | > 0.2 | DRIFT |
+| KS p-value | > 0.05 | OK |
+| KS p-value | 0.01–0.05 | WARN |
+| KS p-value | < 0.01 | DRIFT |
+
+Per-feature status is the stricter of PSI and KS. Overall status is DRIFT if any feature drifts, WARN if any warn, else OK.
+
+**Implementation:**
+- At startup, samples 10k rows from `train_features.parquet` and precomputes per-feature PSI bin edges (percentile-based, 10 bins).
+- On each `/drift` request, fetches raw subscriber inputs from `prediction_rows.features_json` in the requested time window, transforms them through the same `FeaturePipeline`, and computes PSI + `scipy.stats.ks_2samp` per feature column.
+- Returns `INSUFFICIENT_DATA` when fewer than `min_samples` (default 50) live rows are available.
+
+### 11.7 Running
 
 ```bash
 uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload   # development
@@ -785,12 +857,20 @@ The project includes a Vite React dashboard in `dashboard/` for local model-oper
 
 ### 12.1 Capabilities
 
-- **Model overview:** best model, CV ROC-AUC, CV PR-AUC, and feature count.
+- **Model overview:** best model, CV ROC-AUC ± σ, CV PR-AUC, and feature count (live from `/info`).
+- **Holdout KPIs:** Brier score, churn rate, recall and precision at the default threshold.
 - **Candidate comparison:** ROC-AUC leaderboard for CatBoost, XGBoost, LightGBM, and Logistic Regression.
 - **Threshold analysis:** precision, recall, and F1 tradeoff across default, Youden-J, and F1-optimal thresholds.
-- **Feature signals:** high-signal engineered features such as `regularity_rate`, `n_services_absent`, `is_ghost_subscriber`, `REGION_te`, and `top_pack_te`.
+- **ROC and PR curves:** full curves with AUC annotations and random/baseline reference lines.
+- **SHAP feature importance:** mean |SHAP| beeswarm for the top 15 features, coloured by direction (protective / risk / contextual).
+- **Confusion matrix:** TP/FN/FP/TN counts with precision, recall, specificity, and F1 summary.
+- **Calibration curve:** predicted vs observed churn fraction with Brier score annotation.
+- **Geography:** churn rate by region, above/below average colouring; dataset profile and class imbalance bar.
+- **Feature signals:** high-signal engineered features such as `regularity_rate`, `n_services_absent`, `is_ghost_subscriber`.
 - **Live scoring panel:** editable raw subscriber inputs, score-current action, batch queue, and batch prediction results sent to the FastAPI `/predict` endpoint.
 - **Pipeline view:** DVC stage flow from raw validation through serving.
+- **Monitoring panel:** live prediction traffic KPIs (total predictions, total requests, mean churn probability, mean latency) + recent predictions table, populated from `GET /logs`. Includes a refresh button.
+- **Drift panel:** overall drift status badge (OK / WARN / DRIFT / INSUFFICIENT_DATA) + per-feature PSI mini-bar and KS p-value table, populated from `GET /drift`.
 
 ### 12.2 Running Locally
 
@@ -901,7 +981,7 @@ MLflow is optional in all entry points via `--no-mlflow` flag.
 
 ## 16. Test Suite
 
-48 backend tests across 3 files plus dashboard lint/build checks.
+53 backend tests across 3 files plus dashboard lint/build checks.
 
 ### `tests/test_features.py` (18 tests)
 
@@ -919,11 +999,14 @@ Covers every transformer class individually + the full `FeaturePipeline`:
 - `_suggest_params`: CatBoost keys present, ranges valid
 - `_patch_config`: catboost section updated, other keys untouched
 
-### `tests/test_api.py` (14 tests)
+### `tests/test_api.py` (19 tests)
 
-All tests inject `MOCK_ARTIFACTS` via `app.dependency_overrides[get_artifacts]`:
-- `/health`, `/ready`, `/info`, `/predict`
-- edge cases: all-null subscriber, custom threshold, 503 without model, 422 on invalid inputs
+All tests inject mocks via `app.dependency_overrides`. No real model files or DB files required — `_MockPipeline`, `_MockModel`, `_MockDriftDetector`, and a temp-file `PredictionLogger` cover all dependencies.
+
+- `/health`, `/ready`, `/info` — liveness, readiness, model metadata
+- `/predict` — single, batch, custom threshold, all-null subscriber, 503 without model, 422 on invalid inputs
+- `/logs` — empty DB returns zero totals; after two predict calls returns correct aggregates and row-level detail
+- `/drift` — OK report, INSUFFICIENT_DATA report, 503 without drift detector
 
 ---
 
@@ -939,7 +1022,11 @@ All tests inject `MOCK_ARTIFACTS` via `app.dependency_overrides[get_artifacts]`:
 | Feature config | `FeaturePipeline` accepts `top_pack_min_freq`, `target_enc_smoothing`, `regularity_inactive_threshold` from config | Config is the real source of truth |
 | Threshold utility | `threshold_at_recall()` returns lowest threshold if floor unattainable | Maximises recall under impossible campaign constraints |
 | Artifact drift | `evaluate_run.py` fails if saved model features are missing from generated parquet | Makes stale artifacts visible |
-| Dashboard | React ops dashboard with API-aware scoring fallback | Usable local interface for stakeholders |
+| Moroccan holdout evaluation | `evaluate_run.py --dataset moroccan` → `eval_metrics_moroccan.json` | Formal holdout results (ROC-AUC 0.8965, Brier 0.1273 uncal.) |
+| Post-hoc calibration | `calibrate.py` fits isotonic regression on a separate calibration split | Moroccan Brier: 0.1273 → 0.0227 (below baseline 0.0263); sklearn 1.8+ compatible |
+| Prediction logging | `PredictionLogger` (SQLite WAL) + `/logs` endpoint | Every `/predict` call persisted; traffic and latency queryable via dashboard |
+| Feature drift detection | `DriftDetector` (PSI + KS) + `/drift` endpoint | Detects distribution shift vs training baseline; INSUFFICIENT_DATA guard for cold start |
+| Dashboard monitoring panels | Monitoring panel (KPIs + recent table) + Drift panel (status badge + per-feature table) | Full operational visibility in the React dashboard without external tools |
 
 ---
 
@@ -979,17 +1066,17 @@ A calibrated linear model with the engineered feature set closes to within 3.2 p
 
 ## 19. Roadmap
 
-| Item | Priority | Description |
-|------|----------|-------------|
-| Moroccan holdout evaluation | High | Run `evaluate_run.py` equivalent on the Moroccan 20% split; add metrics to `eval_metrics.json` with dataset tag |
-| Prediction logging | High | Persist request metadata, model version, feature payload hashes, prediction probability, threshold, latency, and timestamp for every scored subscriber |
-| Data drift monitoring | High | Detect when live subscriber distributions diverge from training data using Evidently or WhyLogs |
-| Dashboard monitoring panels | High | Extend the React dashboard with traffic volume, prediction distribution, drift status, latency, and error-rate panels |
-| Ground-truth feedback loop | High | Join delayed churn labels back to stored predictions and compute production ROC-AUC, PR-AUC, and calibration metrics over time |
-| Automated retraining trigger | Medium | Retrain when drift exceeds threshold or enough new labels arrive; promote only if the candidate beats the current production model |
+| Item | Status | Description |
+|------|--------|-------------|
+| Moroccan holdout evaluation | ✅ Done | `evaluate_run.py --dataset moroccan`; `eval_metrics_moroccan.json` |
+| Post-hoc calibration | ✅ Done | Isotonic calibration; Brier 0.1273 → 0.0227 on Moroccan holdout |
+| Prediction logging | ✅ Done | `PredictionLogger` SQLite WAL; `/logs` endpoint |
+| Feature drift detection | ✅ Done | `DriftDetector` PSI + KS; `/drift` endpoint |
+| Dashboard monitoring panels | ✅ Done | Monitoring (KPIs + table) + Drift (status + per-feature table) |
+| Ground-truth feedback loop | High | Join delayed churn labels back to `prediction_rows` in `data/predictions.db`; compute production ROC-AUC and Brier over rolling windows |
+| Automated retraining trigger | Medium | Retrain when drift exceeds PSI threshold or production Brier degrades; promote only if candidate beats current model |
 | DVC remote storage | Medium | Configure S3/GCS/Azure remote so the pipeline is reproducible in CI and on new machines |
 | Model registry | Medium | Use MLflow Model Registry to promote models from "staging" to "production" with version tracking and rollback |
-| API hardening | Medium | Add authentication, rate limiting, strict CORS, expanded schema bounds, and structured JSON logs |
-| Cloud deployment | Medium | Deploy the API and dashboard to Azure Container Apps, App Service, AKS, Render, or similar |
-| Optuna dashboard | Low | `optuna-dashboard` provides a live UI for watching trials during long tuning runs |
-| Isotonic / Platt calibration | Low | The calibration curve shows slight over-confidence at high probability values; isotonic regression post-processing would improve the Brier score |
+| API hardening | Medium | Authentication, rate limiting, strict CORS, expanded schema bounds, structured JSON logs |
+| Cloud deployment | Medium | Deploy the API and dashboard to Azure Container Apps, AKS, or Render with auto-scaling |
+| Optuna dashboard | Low | `optuna-dashboard` live UI for watching trials during long tuning runs |

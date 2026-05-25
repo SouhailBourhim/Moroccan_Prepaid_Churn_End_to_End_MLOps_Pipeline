@@ -1175,3 +1175,203 @@ input[type="range"] {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* ── Danger tag (DRIFT status) ───────────────────────────────────────────────── */
+
+.tag.danger {
+  color: #8b3126;
+  background: #ffe6e1;
+  border-color: #f5c4bd;
+}
+
+/* ── Monitoring panel ────────────────────────────────────────────────────────── */
+
+.warn-text {
+  color: var(--amber);
+}
+
+.monitoring-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.monitoring-kpis > div {
+  padding: 12px 14px;
+  background: #f8faf9;
+  border: 1px solid #e4ebe9;
+  border-radius: 6px;
+}
+
+.monitoring-kpis span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.monitoring-kpis strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.monitoring-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e1e9e6;
+  border-radius: 8px;
+}
+
+.monitoring-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.monitoring-table th,
+.monitoring-table td {
+  padding: 9px 10px;
+  text-align: left;
+  border-bottom: 1px solid #e1e9e6;
+}
+
+.monitoring-table tr:last-child td {
+  border-bottom: none;
+}
+
+.monitoring-table th {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  background: #f8faf9;
+}
+
+.mono-cell {
+  font-family: ui-monospace, "Cascadia Code", "Fira Mono", monospace;
+  font-size: 0.82rem;
+}
+
+/* ── Drift panel ─────────────────────────────────────────────────────────────── */
+
+.drift-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.drift-stats > div {
+  padding: 12px 14px;
+  background: #f8faf9;
+  border: 1px solid #e4ebe9;
+  border-radius: 6px;
+}
+
+.drift-stats span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.drift-stats strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.drift-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e1e9e6;
+  border-radius: 8px;
+}
+
+.drift-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.drift-table th,
+.drift-table td {
+  padding: 9px 10px;
+  text-align: left;
+  border-bottom: 1px solid #e1e9e6;
+}
+
+.drift-table tr:last-child td {
+  border-bottom: none;
+}
+
+.drift-table th {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  background: #f8faf9;
+}
+
+.feature-cell {
+  font-family: ui-monospace, "Cascadia Code", "Fira Mono", monospace;
+  font-size: 0.82rem;
+  color: var(--ink);
+}
+
+.psi-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.psi-track {
+  width: 72px;
+  height: 6px;
+  background: #e4ebe9;
+  border-radius: 999px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.psi-bar {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.drift-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.drift-badge.ok { background: #e2f5ec; color: #0d563f; }
+.drift-badge.warn { background: #fff3df; color: #7a4f10; }
+.drift-badge.drift { background: #ffe6e1; color: #8b3126; }
+
+@media (max-width: 1180px) {
+  .monitoring-kpis,
+  .drift-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 620px) {
+  .monitoring-kpis,
+  .drift-stats {
+    grid-template-columns: 1fr 1fr;
+  }
+}

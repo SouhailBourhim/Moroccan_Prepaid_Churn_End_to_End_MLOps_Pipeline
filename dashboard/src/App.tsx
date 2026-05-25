@@ -48,7 +48,7 @@ import {
   thresholdProfiles,
 } from "./data";
 import type { ShapEntry } from "./data";
-import type { ApiInfo, PredictionResponse, ReadyState, SubscriberInput } from "./types";
+import type { ApiInfo, DriftResponse, LogsResponse, PredictionResponse, ReadyState, SubscriberInput } from "./types";
 
 const fallbackInfo: ApiInfo = {
   model_name: "catboost",
@@ -147,6 +147,8 @@ function App() {
   const [prediction, setPrediction] = useState<PredictionResponse | null>(null);
   const [isScoring, setIsScoring] = useState(false);
   const [apiMessage, setApiMessage] = useState("Using local training metrics");
+  const [logsData, setLogsData] = useState<LogsResponse | null>(null);
+  const [driftData, setDriftData] = useState<DriftResponse | null>(null);
 
   const bestModel = useMemo(
     () => modelResults.reduce((best, item) => (item.rocAuc > best.rocAuc ? item : best)),
@@ -193,6 +195,17 @@ function App() {
         setApiInfo(info);
         setReadyState("ready");
         setApiMessage(`Connected to ${apiBase}`);
+
+        const [logsRes, driftRes] = await Promise.allSettled([
+          fetch(`${apiBase}/logs?hours=24&limit=20`, { signal: controller.signal }),
+          fetch(`${apiBase}/drift?hours=24`, { signal: controller.signal }),
+        ]);
+        if (logsRes.status === "fulfilled" && logsRes.value.ok) {
+          setLogsData((await logsRes.value.json()) as LogsResponse);
+        }
+        if (driftRes.status === "fulfilled" && driftRes.value.ok) {
+          setDriftData((await driftRes.value.json()) as DriftResponse);
+        }
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
         setReadyState("offline");
@@ -204,6 +217,23 @@ function App() {
     loadApiState();
     return () => controller.abort();
   }, []);
+
+  async function refreshMonitoring() {
+    try {
+      const [logsRes, driftRes] = await Promise.allSettled([
+        fetch(`${apiBase}/logs?hours=24&limit=20`),
+        fetch(`${apiBase}/drift?hours=24`),
+      ]);
+      if (logsRes.status === "fulfilled" && logsRes.value.ok) {
+        setLogsData((await logsRes.value.json()) as LogsResponse);
+      }
+      if (driftRes.status === "fulfilled" && driftRes.value.ok) {
+        setDriftData((await driftRes.value.json()) as DriftResponse);
+      }
+    } catch {
+      // monitoring data is non-critical
+    }
+  }
 
   const updateField = (key: keyof SubscriberInput, value: string) => {
     setSubscriber((current) => ({ ...current, [key]: value }));
@@ -270,6 +300,8 @@ function App() {
           <a href="#features"><Database aria-hidden="true" />Features</a>
           <a href="#prediction"><SlidersHorizontal aria-hidden="true" />Prediction</a>
           <a href="#pipeline"><GitBranch aria-hidden="true" />Pipeline</a>
+          <a href="#monitoring"><Activity aria-hidden="true" />Monitoring</a>
+          <a href="#drift"><AlertTriangle aria-hidden="true" />Drift</a>
         </nav>
 
         <div className={`api-status ${readyState}`}>
@@ -869,6 +901,199 @@ function App() {
             ))}
           </div>
         </section>
+
+        {/* ── Monitoring ── */}
+        <section id="monitoring" className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Prediction traffic · last 24 h</p>
+              <h2>Live prediction log</h2>
+            </div>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              {logsData && (
+                <span className="tag neutral">{logsData.summary.total_requests} requests</span>
+              )}
+              <button className="icon-button" title="Refresh monitoring data" onClick={() => void refreshMonitoring()}>
+                <RefreshCcw aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+
+          {logsData ? (
+            <>
+              <div className="monitoring-kpis">
+                <div>
+                  <span>Total predictions</span>
+                  <strong>{logsData.summary.total_predictions.toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span>Total requests</span>
+                  <strong>{logsData.summary.total_requests.toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span>Mean churn prob</span>
+                  <strong>
+                    {logsData.summary.mean_churn_probability != null
+                      ? formatPct(logsData.summary.mean_churn_probability)
+                      : "—"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Mean latency</span>
+                  <strong>
+                    {logsData.summary.mean_latency_ms != null
+                      ? `${logsData.summary.mean_latency_ms.toFixed(1)} ms`
+                      : "—"}
+                  </strong>
+                </div>
+              </div>
+
+              {logsData.recent.length > 0 ? (
+                <div className="monitoring-table-wrap">
+                  <table className="monitoring-table">
+                    <thead>
+                      <tr>
+                        <th>Request ID</th>
+                        <th>Time</th>
+                        <th>#</th>
+                        <th>Probability</th>
+                        <th>Decision</th>
+                        <th>Latency</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {logsData.recent.map((row) => (
+                        <tr key={`${row.request_id}-${row.subscriber_idx}`}>
+                          <td className="mono-cell">{row.request_id.slice(0, 8)}…</td>
+                          <td className="mono-cell">
+                            {new Date(row.timestamp).toLocaleString(undefined, {
+                              month: "short", day: "numeric",
+                              hour: "2-digit", minute: "2-digit",
+                            })}
+                          </td>
+                          <td>{row.subscriber_idx + 1}</td>
+                          <td>{formatPct(row.churn_probability, 2)}</td>
+                          <td>
+                            <span className={row.churn_prediction ? "decision-pill retain" : "decision-pill observe"}>
+                              {row.churn_prediction ? "Retain" : "Observe"}
+                            </span>
+                          </td>
+                          <td className="mono-cell">
+                            {row.latency_ms != null ? `${row.latency_ms.toFixed(1)} ms` : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="empty-state">
+                  No requests logged yet. Use the Prediction workspace to score subscribers — each call is persisted here.
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="empty-state">
+              {readyState === "offline"
+                ? "Connect to the FastAPI service to view live prediction logs."
+                : "Loading prediction logs…"}
+            </div>
+          )}
+        </section>
+
+        {/* ── Drift detection ── */}
+        <section id="drift" className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Distribution monitoring · PSI + KS test</p>
+              <h2>Feature drift detection</h2>
+            </div>
+            {driftData && <DriftStatusBadge status={driftData.overall_status} />}
+          </div>
+          <p className="panel-description">
+            Compares live /predict input distributions against the training baseline. PSI &lt; 0.1 → OK · 0.1–0.2 → WARN · &gt; 0.2 → DRIFT. KS p-value &lt; 0.05 → WARN · &lt; 0.01 → DRIFT. Status is the stricter of the two metrics.
+          </p>
+
+          {driftData ? (
+            driftData.overall_status === "INSUFFICIENT_DATA" ? (
+              <div className="empty-state">
+                {`Only ${driftData.n_live_predictions} live prediction${driftData.n_live_predictions === 1 ? "" : "s"} logged in the last 24 h — need at least 50 to run drift analysis. Score more subscribers via the Prediction workspace.`}
+              </div>
+            ) : (
+              <>
+                <div className="drift-stats">
+                  <div>
+                    <span>Live predictions</span>
+                    <strong>{driftData.n_live_predictions.toLocaleString()}</strong>
+                  </div>
+                  <div>
+                    <span>Features checked</span>
+                    <strong>{driftData.n_features_checked}</strong>
+                  </div>
+                  <div>
+                    <span>Drifted</span>
+                    <strong className={driftData.n_drifted > 0 ? "danger-text" : ""}>{driftData.n_drifted}</strong>
+                  </div>
+                  <div>
+                    <span>Warned</span>
+                    <strong className={driftData.n_warned > 0 ? "warn-text" : ""}>{driftData.n_warned}</strong>
+                  </div>
+                </div>
+
+                {driftData.features.length > 0 && (
+                  <div className="drift-table-wrap">
+                    <table className="drift-table">
+                      <thead>
+                        <tr>
+                          <th>Feature</th>
+                          <th>PSI</th>
+                          <th>KS stat</th>
+                          <th>KS p-value</th>
+                          <th>Live n</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {driftData.features.map((f) => (
+                          <tr key={f.feature}>
+                            <td className="feature-cell">{f.feature}</td>
+                            <td>
+                              <div className="psi-bar-wrap">
+                                <div className="psi-track">
+                                  <div
+                                    className="psi-bar"
+                                    style={{
+                                      width: `${Math.min((f.psi / 0.3) * 100, 100)}%`,
+                                      background:
+                                        f.status === "DRIFT" ? "#bd4b3b"
+                                        : f.status === "WARN" ? "#b97724"
+                                        : "#167a5c",
+                                    }}
+                                  />
+                                </div>
+                                <span className="mono-cell">{f.psi.toFixed(4)}</span>
+                              </div>
+                            </td>
+                            <td className="mono-cell">{f.ks_statistic.toFixed(4)}</td>
+                            <td className="mono-cell">{f.ks_pvalue.toFixed(4)}</td>
+                            <td>{f.n_live.toLocaleString()}</td>
+                            <td><DriftFeatureBadge status={f.status} /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            )
+          ) : (
+            <div className="empty-state">
+              {readyState === "offline"
+                ? "Connect to the FastAPI service to view drift detection results."
+                : "Loading drift report…"}
+            </div>
+          )}
+        </section>
       </section>
     </main>
   );
@@ -977,6 +1202,30 @@ function MetricTile({ icon, label, value, detail, tone }: MetricTileProps) {
       {detail && <small>{detail}</small>}
     </div>
   );
+}
+
+const DRIFT_STATUS_LABEL: Record<string, string> = {
+  OK: "OK — stable",
+  WARN: "WARN — check",
+  DRIFT: "DRIFT — alert",
+  INSUFFICIENT_DATA: "Insufficient data",
+};
+
+function DriftStatusBadge({ status }: { status: string }) {
+  const cls =
+    status === "OK" ? "tag"
+    : status === "WARN" ? "tag warning"
+    : status === "DRIFT" ? "tag danger"
+    : "tag neutral";
+  return <span className={cls}>{DRIFT_STATUS_LABEL[status] ?? status}</span>;
+}
+
+function DriftFeatureBadge({ status }: { status: string }) {
+  const cls =
+    status === "OK" ? "drift-badge ok"
+    : status === "WARN" ? "drift-badge warn"
+    : "drift-badge drift";
+  return <span className={cls}>{status}</span>;
 }
 
 export default App;

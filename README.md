@@ -3,7 +3,7 @@
 Production-grade churn prediction for prepaid telecom subscribers. Trains on the [Expresso Telecom dataset](https://zindi.africa/competitions/expresso-churn-prediction) (Senegal, 2.15M subscribers) and a synthetically generated Moroccan prepaid dataset (2M subscribers, CTGAN-calibrated to ANRT 2023 market data). Target metric: **ROC-AUC**. Class imbalance: **18.75% churn (Expresso) / 2.7% churn (Moroccan)**.
 
 > **Expresso holdout — ROC-AUC: 0.9330 · PR-AUC: 0.7071 · Brier: 0.1119** (CatBoost, 20% stratified holdout)
-> **Moroccan synthetic — XGBoost Optuna CV ROC-AUC: 0.8972 ± 0.0014** (tuned, 400k subsample)
+> **Moroccan holdout — ROC-AUC: 0.8965 · PR-AUC: 0.2319 · Brier: 0.0227** (XGBoost + isotonic calibration, 400k holdout)
 
 ---
 
@@ -59,11 +59,15 @@ docker compose up --build
 | Model evaluation | ✅ Done | `notebooks/06_model_evaluation.ipynb`, `models/eval_metrics.json` |
 | Moroccan synthetic dataset generation | ✅ Done | `generate_moroccan_dataset.py` (CTGAN, 2M rows, DVC-tracked) |
 | FastAPI serving endpoint | ✅ Done | `src/api/`, port 8000 |
-| React operations dashboard | ✅ Done | `dashboard/`, port 5173 |
+| Prediction logging | ✅ Done | `src/api/logger.py`, SQLite WAL, `/logs` endpoint |
+| Feature drift detection | ✅ Done | `src/monitoring/drift.py`, PSI + KS, `/drift` endpoint |
+| Post-hoc probability calibration | ✅ Done | `src/models/calibrate.py`, isotonic regression |
+| Moroccan holdout evaluation | ✅ Done | `evaluate_run.py --dataset moroccan`, `eval_metrics_moroccan.json` |
+| React operations dashboard | ✅ Done | `dashboard/`, port 5173 — includes Monitoring + Drift panels |
 | Docker containerisation | ✅ Done | `Dockerfile`, `docker-compose.yml` |
 | DVC reproducible pipeline | ✅ Done | `dvc.yaml` (featurize → train → evaluate) |
 | CI/CD | ✅ Done | `.github/workflows/ci.yml` |
-| Production monitoring loop | 🔜 Next | prediction logging, drift checks, feedback labels |
+| Ground-truth feedback loop | 🔜 Next | delayed label join, production ROC-AUC tracking |
 
 ---
 
@@ -99,18 +103,28 @@ src/
     evaluate_run.py            ← standalone holdout eval (DVC stage output)
     predict.py                 ← CLI inference on raw CSV
   api/
-    app.py                     ← FastAPI: /health /ready /info /predict
+    app.py                     ← FastAPI: /health /ready /info /predict /logs /drift
     schemas.py                 ← Pydantic request/response models
     dependencies.py            ← ModelArtifacts loader (singleton on startup)
+    logger.py                  ← PredictionLogger: SQLite WAL, log_request/summary/recent
+  monitoring/
+    drift.py                   ← DriftDetector: PSI + KS 2-sample test vs training baseline
+  models/
+    calibrate.py               ← CalibratedChurnModel: isotonic / Platt post-hoc calibration
   utils/
     logging.py                 ← loguru setup
 
 models/                        ← DVC-tracked artifacts
   best_model.pkl               ← fitted CatBoost + feature_cols list
+  best_model_calibrated.pkl    ← CalibratedChurnModel wrapper (isotonic; gitignored)
   training_manifest.json       ← CV results for all 4 candidates
-  eval_metrics.json            ← holdout metrics (DVC metric)
+  eval_metrics.json            ← Expresso holdout metrics (DVC metric)
+  eval_metrics_moroccan.json   ← Moroccan holdout metrics
+  eval_metrics_moroccan_calibrated.json ← before/after calibration comparison
   tuning_results.json          ← CatBoost Optuna best params
   tuning_results_xgboost.json  ← XGBoost Optuna best params
+
+data/predictions.db            ← SQLite prediction log (gitignored, WAL mode)
 
 notebooks/
   01–04_eda*.ipynb             ← EDA on 3 datasets + cross-dataset analysis
@@ -240,7 +254,9 @@ uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
 | `/health` | GET | Liveness probe — always 200 |
 | `/ready` | GET | Readiness probe — 503 until model loaded |
 | `/info` | GET | Model name, CV AUC, feature count |
-| `/predict` | POST | Batch churn scoring (1–10 000 subscribers) |
+| `/predict` | POST | Batch churn scoring (1–10 000 subscribers) — logged to SQLite |
+| `/logs` | GET | Prediction log summary + recent rows (`?hours=24&limit=50`) |
+| `/drift` | GET | Per-feature drift report vs training baseline (`?hours=24&min_samples=50`) |
 
 **Example:**
 
@@ -265,11 +281,14 @@ Interactive docs: `http://localhost:8000/docs`
 The React dashboard in `dashboard/` gives a local operations view over the project:
 
 - model KPI tiles for best model, CV ROC-AUC, CV PR-AUC, and feature count
-- candidate model comparison chart
-- threshold tradeoff chart for precision, recall, and F1
+- candidate model comparison chart and threshold precision/recall/F1 tradeoff
+- ROC curve, PR curve, SHAP feature importance, confusion matrix, calibration curve
+- regional churn heatmap and dataset profile
 - high-signal feature list for engineered churn indicators
 - editable subscriber scoring panel with score-current, batch queue, and batch results
-- DVC stage flow showing the current reproducible pipeline
+- DVC stage flow visualisation
+- **Monitoring panel** — live prediction traffic KPIs (total predictions, total requests, mean churn probability, mean latency) + recent predictions table, populated from `GET /logs`
+- **Drift panel** — overall drift status badge (OK / WARN / DRIFT) + per-feature PSI and KS test results with mini-bar visualisation, populated from `GET /drift`
 
 ```bash
 cd dashboard
@@ -331,10 +350,10 @@ Full rationale: [`docs/PROJECT.md`](docs/PROJECT.md) § Feature Engineering.
 ## Development
 
 ```bash
-pytest                              # 48 tests
+pytest                              # 53 tests
 pytest tests/test_features.py -v   # feature tests only
 pytest tests/test_models.py -v     # model utility tests
-pytest tests/test_api.py -v        # API endpoint tests
+pytest tests/test_api.py -v        # API endpoint tests (19 tests)
 
 ruff check src/ tests/             # lint
 mypy src/                          # type check
@@ -371,17 +390,14 @@ Sources: [Zindi Expresso Challenge](https://zindi.africa/competitions/expresso-c
 
 ## What's Next
 
-The next production milestone is the monitoring and feedback loop:
+The monitoring and feedback loop is now live — prediction logging, drift detection, and the React monitoring panels are implemented. The remaining production milestones are:
 
-1. Log prediction requests, scores, latency, model version, and timestamps.
-2. Compare live feature distributions against the training baseline for drift.
-3. Join future ground-truth churn labels back to stored predictions.
-4. Trigger retraining when drift or performance degradation crosses a threshold.
-5. Promote model versions through MLflow registry with rollback support.
-6. Surface drift, traffic, and prediction distribution in the React dashboard.
+1. **Ground-truth feedback loop** — join delayed churn labels back to stored predictions in `data/predictions.db` and compute production ROC-AUC, PR-AUC, and Brier score over rolling windows.
+2. **Automated retraining trigger** — retrain when drift or performance degradation crosses a threshold; promote via MLflow registry with rollback support.
+3. **Cloud deployment** — deploy the API and dashboard to Azure Container Apps, AKS, or Render with auto-scaling and health checks.
+4. **API hardening** — authentication, rate limiting, expanded structured JSON logging, and container scanning.
 
-After that, harden deployment with API auth, rate limiting, CORS controls, container scanning, and a real cloud deployment target.
+For a full technical walkthrough of the implemented architecture, see [`docs/PROJECT.md`](docs/PROJECT.md).
 
 ---
 
-For a full technical and functional walkthrough, see [`docs/PROJECT.md`](docs/PROJECT.md).
