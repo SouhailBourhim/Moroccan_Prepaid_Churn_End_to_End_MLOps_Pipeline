@@ -45,6 +45,7 @@ from src.utils.logging import setup_logger
 
 ROOT = Path(__file__).parents[2]
 PREDICTIONS_DB = ROOT / "data" / "predictions.db"
+FEATURES_DIR = ROOT / "data" / "features"
 
 # ── Column dtype maps (mirrors ingestion.py) ──────────────────────────────────
 
