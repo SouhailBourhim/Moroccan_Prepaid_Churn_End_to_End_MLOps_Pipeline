@@ -234,14 +234,14 @@ def test_fit_final_model_disables_xgboost_early_stopping() -> None:
 
 
 def test_suggest_params_keys_and_ranges() -> None:
-    """_suggest_params must produce a dict with all required CatBoost keys."""
+    """_suggest_catboost must produce a dict with all required CatBoost keys."""
     import optuna
 
-    from src.models.tune import _suggest_params
+    from src.models.tune import _suggest_catboost
 
     study = optuna.create_study(direction="maximize")
     trial = study.ask()
-    params = _suggest_params(trial, random_state=42)
+    params = _suggest_catboost(trial, random_state=42)
 
     required = {
         "depth", "learning_rate", "l2_leaf_reg",
@@ -274,7 +274,7 @@ def test_patch_config_updates_catboost_section(tmp_path: pytest.TempPathFactory)
         "min_data_in_leaf": 80,
         "mean_best_iteration": 450,
     }
-    _patch_config(cfg_path, best)  # type: ignore[arg-type]
+    _patch_config(cfg_path, best, "catboost")  # type: ignore[arg-type]
 
     updated = yaml.safe_load(cfg_path.read_text())
     assert updated["catboost"]["depth"] == 6
