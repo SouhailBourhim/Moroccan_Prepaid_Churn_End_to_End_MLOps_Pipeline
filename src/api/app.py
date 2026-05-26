@@ -8,6 +8,18 @@ Run locally:
 
 Or via config values in configs/base.yaml:
     uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --workers 4
+
+Auth:
+    Set CHURN_API_KEYS="key1,key2" to enable API-key auth on all protected
+    endpoints. Omitting the variable leaves the API open (local dev mode).
+    /health is always exempt.
+
+Rate limiting:
+    CHURN_RATE_LIMIT_GENERAL (default 200 req/60s) — /ready /info /logs /drift
+    CHURN_RATE_LIMIT_PREDICT (default 30 req/60s)  — /predict
+
+Logging:
+    Set LOG_FORMAT=json for structured JSON output (production log aggregators).
 """
 from __future__ import annotations
 
@@ -20,12 +32,14 @@ from typing import Annotated, Any
 
 import numpy as np
 import pandas as pd
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+from src.api.auth import require_api_key
 from src.api.dependencies import ModelArtifacts, load_artifacts
 from src.api.logger import PredictionLogger
+from src.api.rate_limit import general_limiter, predict_limiter
 from src.api.schemas import (
     DriftResponse,
     FeatureDriftResult,
@@ -104,7 +118,7 @@ app = FastAPI(
         "**GET  /ready**   — readiness probe (503 until model is loaded).\n"
         "**GET  /health**  — liveness probe (always 200)."
     ),
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -118,11 +132,11 @@ app.add_middleware(
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 
-# ── Dependencies ──────────────────────────────────────────────────────────────
+# ── Core dependencies ─────────────────────────────────────────────────────────
 
 
 def get_artifacts() -> ModelArtifacts:
@@ -146,9 +160,27 @@ def get_drift_detector() -> DriftDetector:
     return detector
 
 
+# ── Rate-limit dependency callables (exported for test overriding) ─────────────
+
+
+def check_general_rate(request: Request) -> None:
+    """Dependency — apply the general rate limit (default 200 req/60s)."""
+    general_limiter.check(request)
+
+
+def check_predict_rate(request: Request) -> None:
+    """Dependency — apply the predict rate limit (default 30 req/60s)."""
+    predict_limiter.check(request)
+
+
+# ── Annotated dependency aliases ──────────────────────────────────────────────
+
 ArtifactsDep = Annotated[ModelArtifacts, Depends(get_artifacts)]
 LoggerDep = Annotated[PredictionLogger, Depends(get_pred_logger)]
 DriftDep = Annotated[DriftDetector, Depends(get_drift_detector)]
+KeyDep = Annotated[str, Depends(require_api_key)]
+GeneralRateDep = Annotated[None, Depends(check_general_rate)]
+PredictRateDep = Annotated[None, Depends(check_predict_rate)]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -172,18 +204,26 @@ def _to_dataframe(subscribers: list[SubscriberFeatures]) -> pd.DataFrame:
 
 @app.get("/health", response_model=HealthResponse, tags=["ops"])
 def health() -> HealthResponse:
-    """Liveness probe — always returns 200."""
+    """Liveness probe — always returns 200. No auth required."""
     return HealthResponse(status="ok")
 
 
 @app.get("/ready", response_model=ReadyResponse, tags=["ops"])
-def ready(artifacts: ArtifactsDep) -> ReadyResponse:
+def ready(
+    artifacts: ArtifactsDep,
+    _key: KeyDep,
+    _rate: GeneralRateDep,
+) -> ReadyResponse:
     """Readiness probe — 503 until the model is loaded."""
     return ReadyResponse(status="ok", model_loaded=True)
 
 
 @app.get("/info", response_model=InfoResponse, tags=["ops"])
-def info(artifacts: ArtifactsDep) -> InfoResponse:
+def info(
+    artifacts: ArtifactsDep,
+    _key: KeyDep,
+    _rate: GeneralRateDep,
+) -> InfoResponse:
     """Return model name, CV ROC-AUC, and feature count from the training manifest."""
     m = artifacts.manifest
     return InfoResponse(
@@ -200,6 +240,8 @@ def predict(
     request: PredictionRequest,
     artifacts: ArtifactsDep,
     pred_logger: LoggerDep,
+    _key: KeyDep,
+    _rate: PredictRateDep,
 ) -> PredictionResponse:
     """Score a batch of subscribers and return churn probabilities.
 
@@ -258,6 +300,8 @@ def predict(
 @app.get("/drift", response_model=DriftResponse, tags=["monitoring"])
 def drift(
     detector: DriftDep,
+    _key: KeyDep,
+    _rate: GeneralRateDep,
     hours: int = Query(default=24, ge=1, le=720, description="Look-back window in hours"),
     min_samples: int = Query(default=50, ge=1, description="Minimum live rows required"),
 ) -> DriftResponse:
@@ -293,6 +337,8 @@ def drift(
 @app.get("/logs", response_model=LogsResponse, tags=["ops"])
 def logs(
     pred_logger: LoggerDep,
+    _key: KeyDep,
+    _rate: GeneralRateDep,
     hours: int = Query(default=24, ge=1, le=720, description="Summary window in hours"),
     limit: int = Query(default=50, ge=1, le=500, description="Max recent rows to return"),
 ) -> LogsResponse:

@@ -12,11 +12,20 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
-from src.api.app import app, get_artifacts, get_drift_detector, get_pred_logger
+from src.api.app import (
+    app,
+    check_general_rate,
+    check_predict_rate,
+    get_artifacts,
+    get_drift_detector,
+    get_pred_logger,
+)
 from src.api.dependencies import ModelArtifacts
 from src.api.logger import PredictionLogger
+from src.api.rate_limit import SlidingWindowLimiter
 from src.monitoring.drift import DriftDetector, DriftReport, FeatureDriftResult
 
 # ── Mock artifacts ────────────────────────────────────────────────────────────
@@ -120,11 +129,17 @@ def tmp_logger() -> PredictionLogger:
 
 @pytest.fixture
 def client(tmp_logger: PredictionLogger) -> TestClient:
-    """TestClient with mock artifacts, temp prediction logger, and mock drift detector."""
+    """TestClient with mock artifacts, temp prediction logger, and mock drift detector.
+
+    Rate-limit dependencies are bypassed (no-ops) so individual tests are
+    isolated from the module-level sliding-window counters.
+    """
     mock_detector = _MockDriftDetector(_OK_REPORT)
     app.dependency_overrides[get_artifacts] = lambda: MOCK_ARTIFACTS
     app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
     app.dependency_overrides[get_drift_detector] = lambda: mock_detector
+    app.dependency_overrides[check_general_rate] = lambda: None
+    app.dependency_overrides[check_predict_rate] = lambda: None
     c = TestClient(app, raise_server_exceptions=True)
     yield c  # type: ignore[misc]
     app.dependency_overrides.clear()
@@ -144,6 +159,8 @@ def unready_client(tmp_logger: PredictionLogger) -> TestClient:
     app.dependency_overrides[get_artifacts] = _raise_model
     app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
     app.dependency_overrides[get_drift_detector] = _raise_drift
+    app.dependency_overrides[check_general_rate] = lambda: None
+    app.dependency_overrides[check_predict_rate] = lambda: None
     c = TestClient(app, raise_server_exceptions=False)
     yield c  # type: ignore[misc]
     app.dependency_overrides.clear()
@@ -314,3 +331,100 @@ def test_logs_records_predict_calls(client: TestClient) -> None:
     assert "churn_probability" in row
     assert "churn_prediction" in row
     assert "latency_ms" in row
+
+
+# ── Auth (API key) ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def auth_client(tmp_logger: PredictionLogger, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """TestClient with auth enabled via CHURN_API_KEYS env var."""
+    monkeypatch.setenv("CHURN_API_KEYS", "valid-key-1,valid-key-2")
+    mock_detector = _MockDriftDetector(_OK_REPORT)
+    app.dependency_overrides[get_artifacts] = lambda: MOCK_ARTIFACTS
+    app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
+    app.dependency_overrides[get_drift_detector] = lambda: mock_detector
+    app.dependency_overrides[check_general_rate] = lambda: None
+    app.dependency_overrides[check_predict_rate] = lambda: None
+    c = TestClient(app, raise_server_exceptions=False)
+    yield c  # type: ignore[misc]
+    app.dependency_overrides.clear()
+
+
+def test_health_exempt_from_auth(auth_client: TestClient) -> None:
+    """/health must return 200 even without an API key."""
+    r = auth_client.get("/health")
+    assert r.status_code == 200
+
+
+def test_predict_401_without_key(auth_client: TestClient) -> None:
+    r = auth_client.post("/predict", json={"subscribers": [VALID_SUBSCRIBER]})
+    assert r.status_code == 401
+    assert "API key" in r.json()["detail"]
+
+
+def test_predict_401_with_wrong_key(auth_client: TestClient) -> None:
+    r = auth_client.post(
+        "/predict",
+        json={"subscribers": [VALID_SUBSCRIBER]},
+        headers={"X-API-Key": "wrong-key"},
+    )
+    assert r.status_code == 401
+
+
+def test_predict_200_with_valid_key(auth_client: TestClient) -> None:
+    r = auth_client.post(
+        "/predict",
+        json={"subscribers": [VALID_SUBSCRIBER]},
+        headers={"X-API-Key": "valid-key-2"},
+    )
+    assert r.status_code == 200
+    assert r.json()["n_subscribers"] == 1
+
+
+def test_info_401_without_key(auth_client: TestClient) -> None:
+    r = auth_client.get("/info")
+    assert r.status_code == 401
+
+
+def test_info_200_with_valid_key(auth_client: TestClient) -> None:
+    r = auth_client.get("/info", headers={"X-API-Key": "valid-key-1"})
+    assert r.status_code == 200
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def rate_limited_client(tmp_logger: PredictionLogger) -> TestClient:
+    """TestClient where /predict is limited to 1 request per window."""
+    tight_limiter = SlidingWindowLimiter(max_requests=1)
+
+    def _check_tight(request: Request) -> None:
+        tight_limiter.check(request)
+
+    app.dependency_overrides[get_artifacts] = lambda: MOCK_ARTIFACTS
+    app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
+    app.dependency_overrides[get_drift_detector] = lambda: _MockDriftDetector(_OK_REPORT)
+    app.dependency_overrides[check_general_rate] = lambda: None
+    app.dependency_overrides[check_predict_rate] = _check_tight
+    c = TestClient(app, raise_server_exceptions=False)
+    yield c  # type: ignore[misc]
+    app.dependency_overrides.clear()
+
+
+def test_rate_limit_predict_429_on_excess(rate_limited_client: TestClient) -> None:
+    payload = {"subscribers": [VALID_SUBSCRIBER]}
+    r1 = rate_limited_client.post("/predict", json=payload)
+    assert r1.status_code == 200
+    r2 = rate_limited_client.post("/predict", json=payload)
+    assert r2.status_code == 429
+    assert "Retry-After" in r2.headers
+
+
+def test_rate_limit_health_unaffected(rate_limited_client: TestClient) -> None:
+    """/health has no rate limit — must succeed regardless of /predict exhaustion."""
+    payload = {"subscribers": [VALID_SUBSCRIBER]}
+    rate_limited_client.post("/predict", json=payload)  # exhaust predict limit
+    r = rate_limited_client.get("/health")
+    assert r.status_code == 200
