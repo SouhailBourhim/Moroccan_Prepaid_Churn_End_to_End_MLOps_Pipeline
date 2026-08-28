@@ -2,45 +2,16 @@
 
 Production-grade churn prediction for prepaid telecom subscribers. Trains on the [Expresso Telecom dataset](https://zindi.africa/competitions/expresso-churn-prediction) (Senegal, 2.15M subscribers) and a synthetically generated Moroccan prepaid dataset (2M subscribers, CTGAN-calibrated to ANRT 2023 market data). Target metric: **ROC-AUC**. Class imbalance: **18.75% churn (Expresso) / 2.7% churn (Moroccan)**.
 
+**Stack:** Python · CatBoost · XGBoost · CTGAN (SDV) · DVC · FastAPI · React + Vite + TypeScript · Docker
+
+Morocco has no public prepaid churn dataset. Rather than stop there, the pipeline trains on Senegal's
+Expresso data and then generates a 2M-subscriber Moroccan dataset with CTGAN calibrated to ANRT 2023
+market statistics — and reports both holdouts separately, because a synthetic result is not the same
+kind of evidence as a real one. The 2.7% base rate is why PR-AUC (0.2319) is quoted next to ROC-AUC
+rather than behind it.
+
 > **Expresso holdout — ROC-AUC: 0.9330 · PR-AUC: 0.7071 · Brier: 0.1119** (CatBoost, 20% stratified holdout)
 > **Moroccan holdout — ROC-AUC: 0.8965 · PR-AUC: 0.2319 · Brier: 0.0227** (XGBoost + isotonic calibration, 400k holdout)
-
----
-
-## Quick Start
-
-```bash
-# 1. Clone and install
-git clone https://github.com/SouhailBourhim/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline
-cd Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-# 2. Pull raw data via DVC (requires a configured remote)
-dvc pull
-# or place Train.csv / Test.csv manually in data/raw/expresso/
-
-# 3. Run the full pipeline (Expresso)
-dvc repro
-
-# 4. Generate the Moroccan synthetic dataset (CTGAN, ~15 min on GPU / ~2h on CPU)
-python generate_moroccan_dataset.py --n-rows 2000000 --epochs 300 --output data/raw/moroccan_telecom_churn.csv
-# Fast bootstrap fallback (no CTGAN, <60s):
-python generate_moroccan_dataset.py --no-ctgan
-
-# 5. Start the API
-uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
-# → http://localhost:8000/docs
-
-# 6. Start the React dashboard
-cd dashboard
-npm install
-npm run dev
-# → http://localhost:5173
-
-# 7. Or run the API via Docker
-docker compose up --build
-```
 
 ---
 
@@ -141,6 +112,43 @@ dashboard/                     ← Vite React dashboard for model ops
 Dockerfile                     ← multi-stage build (3.3 GB; catboost is the floor)
 docker-compose.yml             ← mounts models/ and data/features/ as volumes
 dvc.yaml                       ← featurize → train → evaluate pipeline DAG
+```
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone and install
+git clone https://github.com/SouhailBourhim/Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline
+cd Moroccan_Prepaid_Churn_End_to_End_MLOps_Pipeline
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
+# 2. Pull raw data via DVC (requires a configured remote)
+dvc pull
+# or place Train.csv / Test.csv manually in data/raw/expresso/
+
+# 3. Run the full pipeline (Expresso)
+dvc repro
+
+# 4. Generate the Moroccan synthetic dataset (CTGAN, ~15 min on GPU / ~2h on CPU)
+python generate_moroccan_dataset.py --n-rows 2000000 --epochs 300 --output data/raw/moroccan_telecom_churn.csv
+# Fast bootstrap fallback (no CTGAN, <60s):
+python generate_moroccan_dataset.py --no-ctgan
+
+# 5. Start the API
+uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
+# → http://localhost:8000/docs
+
+# 6. Start the React dashboard
+cd dashboard
+npm install
+npm run dev
+# → http://localhost:5173
+
+# 7. Or run the API via Docker
+docker compose up --build
 ```
 
 ---
