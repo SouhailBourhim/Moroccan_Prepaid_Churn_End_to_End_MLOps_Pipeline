@@ -44,7 +44,7 @@ The project currently includes:
 - CI for lint, types, tests (including an end-to-end train → evaluate test), dashboard lint/build, and a Docker build with smoke test
 - a React operations dashboard with live Monitoring and Drift panels and API-key support
 
-> Metrics quoted from before the protocol fix are kept in `models/legacy/` and are optimistic; see its README. Regenerate valid numbers with `dvc repro`.
+> Current results (§7.3, §9.1) come from `dvc repro` under the leak-free protocol. Metrics from before the fix are kept in `models/legacy/` for reference and are optimistic; see its README.
 
 ---
 
@@ -469,7 +469,18 @@ Four classifiers are evaluated in parallel. Selection rationale is documented in
 
 ### 7.3 Results
 
-Run `dvc repro`. CV results for all four candidates are written to `models/{dataset}/training_manifest.json` (`all_results`). Pre-fix CV numbers are in `models/legacy/` and are slightly optimistic: early stopping watched the scored fold, and target encodings were fit on all rows.
+5-fold CV on the training split (`models/{dataset}/training_manifest.json`, `all_results`):
+
+| Model | Expresso ROC-AUC | Expresso PR-AUC | Rounds | Moroccan ROC-AUC | Moroccan PR-AUC | Rounds |
+|---|---|---|---|---|---|---|
+| **XGBoost** ★ | **0.9314** ± 0.0004 | 0.7065 | 284 | **0.9216** ± 0.0013 | 0.3159 | 376 |
+| LightGBM | 0.9314 ± 0.0004 | 0.7057 | 205 | 0.9202 ± 0.0014 | 0.3175 | 191 |
+| CatBoost | 0.9314 ± 0.0004 | 0.7065 | 506 | 0.9198 ± 0.0015 | 0.3010 | 552 |
+| Logistic Regression | 0.9284 ± 0.0003 | 0.6891 | — | 0.8981 ± 0.0016 | 0.1699 | — |
+
+"Rounds" is the mean early-stopped boosting round count, used for the final refit. On Expresso the three boosted models are tied, and XGBoost wins on the fifth decimal. Pre-fix CV numbers (`models/legacy/`) were about 0.0002 higher, because early stopping watched the scored fold and target encodings were fit on all rows.
+
+CatBoost on the Moroccan data stopped at its 552-round cap (from the earlier tuning run) without early stopping triggering, so retuning it on the regenerated dataset may help.
 
 ### 7.4 Final Model
 
@@ -586,6 +597,19 @@ After tuning, the dataset's overlay `configs/{dataset}.yaml` is rewritten with t
 All five are fixed. The old numbers are in `models/legacy/`.
 
 ### 9.1 Holdout Metrics
+
+Holdout results of the served model (XGBoost + isotonic calibration):
+
+| Metric | Expresso | Moroccan |
+|---|---|---|
+| Holdout size · churn rate | 430,810 · 18.75% | 400,000 · 2.70% |
+| ROC-AUC | 0.9316 | 0.9226 |
+| PR-AUC | 0.7034 | 0.3198 |
+| Brier: calibrated / uncalibrated / base rate | 0.0815 / 0.1130 / 0.1524 | 0.0213 / 0.1142 / 0.0263 |
+| Youden-J threshold · F1 · P · R | 0.191 · 0.677 · 0.537 · 0.917 | 0.029 · 0.225 · 0.129 · 0.870 |
+| F1-optimal threshold · F1 · P · R | 0.343 · 0.699 · 0.609 · 0.820 | 0.179 · 0.374 · 0.303 · 0.491 |
+
+The Expresso raw data was verified byte-for-byte (MD5) against the `.dvc` pointers. The Moroccan dataset was regenerated with the current generator (CTGAN, 300 epochs, 2M rows), so its pointer hash changed.
 
 `python -m src.models.evaluate_run --dataset {expresso,moroccan}` writes `models/{dataset}/eval_metrics.json`:
 

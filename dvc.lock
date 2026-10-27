@@ -1,0 +1,330 @@
+schema: '2.0'
+stages:
+  featurize_expresso:
+    cmd: python -m src.features.run_pipeline --dataset expresso --no-mlflow
+    deps:
+    - path: configs/expresso.yaml
+      hash: md5
+      md5: 05ebd244132823a57728a669404f39b8
+      size: 155
+    - path: data/raw/expresso/Test.csv
+      hash: md5
+      md5: ae65c3f2168ff88685ab0c0c003d7f5c
+      size: 44997161
+    - path: data/raw/expresso/Train.csv
+      hash: md5
+      md5: 16cccdd3289f1f95eb993a1f811f6bbc
+      size: 259026777
+    - path: src/data/ingestion.py
+      hash: md5
+      md5: 8016de87bcea700ca7c1f9f2310cb930
+      size: 2963
+    - path: src/data/validation.py
+      hash: md5
+      md5: a7e01782716f2644bddafe998785242f
+      size: 2359
+    - path: src/features/build_features.py
+      hash: md5
+      md5: 659108be03ef9ad90ac6de56049eec06
+      size: 25841
+    - path: src/features/run_pipeline.py
+      hash: md5
+      md5: c889458e61841800a76876099df320d6
+      size: 12154
+    - path: src/utils/config.py
+      hash: md5
+      md5: d8142fbcdaa065b769407b5326021684
+      size: 4688
+    params:
+      configs/base.yaml:
+        features:
+          top_pack_min_freq: 200
+          target_enc_smoothing: 20.0
+          target_enc_cv: 5
+          regularity_inactive_threshold: 5
+        training.random_state: 42
+        training.test_size: 0.2
+    outs:
+    - path: data/features/expresso/feature_manifest.json
+      hash: md5
+      md5: eb330eaa239b5aeb074f874c28526263
+      size: 1065
+    - path: data/features/expresso/feature_pipeline.pkl
+      hash: md5
+      md5: 2ecea749f837aaff8ede4c0bd84d78f1
+      size: 6999
+    - path: data/features/expresso/feature_stats.csv
+      hash: md5
+      md5: 3d36694042e51ba353b962335ae08e3a
+      size: 2789
+    - path: data/features/expresso/holdout_features.parquet
+      hash: md5
+      md5: 7c4e49635c8935f03a05aba4413177ea
+      size: 28052322
+    - path: data/features/expresso/score_features.parquet
+      hash: md5
+      md5: c2a64cb75b809bf1e0bb54bacfee1f3e
+      size: 23921385
+    - path: data/features/expresso/train_features.parquet
+      hash: md5
+      md5: c903050d3857bc98e9dccf1cfefd0d03
+      size: 44053741
+  train_expresso:
+    cmd: python -m src.models.train --dataset expresso --no-mlflow
+    deps:
+    - path: configs/expresso.yaml
+      hash: md5
+      md5: 05ebd244132823a57728a669404f39b8
+      size: 155
+    - path: data/features/expresso/train_features.parquet
+      hash: md5
+      md5: c903050d3857bc98e9dccf1cfefd0d03
+      size: 44053741
+    - path: src/models/calibrate.py
+      hash: md5
+      md5: 2201577daf4bc952898b041b2caee3d0
+      size: 4647
+    - path: src/models/evaluate.py
+      hash: md5
+      md5: 821217a62e5ccc59acaf714f96273ee8
+      size: 8615
+    - path: src/models/fitting.py
+      hash: md5
+      md5: b4ed084f2b7e95ea54bbf4304e6d641f
+      size: 3104
+    - path: src/models/train.py
+      hash: md5
+      md5: 720d251039b9cdc721857c2eb91c99c9
+      size: 19549
+    params:
+      configs/base.yaml:
+        catboost:
+          iterations: 1000
+          depth: 7
+          learning_rate: 0.05
+          l2_leaf_reg: 3.0
+          subsample: 0.8
+          colsample_bylevel: 0.8
+          min_data_in_leaf: 50
+        lightgbm:
+          n_estimators: 1000
+          max_depth: 7
+          learning_rate: 0.05
+          num_leaves: 127
+          subsample: 0.8
+          colsample_bytree: 0.8
+          min_child_samples: 100
+          reg_alpha: 0.1
+          reg_lambda: 1.0
+        logistic_regression:
+          C: 0.1
+          max_iter: 1000
+        training:
+          random_state: 42
+          test_size: 0.2
+          cv_folds: 5
+          eval_metric: roc_auc
+          early_stopping_rounds: 50
+        xgboost:
+          n_estimators: 1000
+          max_depth: 7
+          learning_rate: 0.05
+          subsample: 0.8
+          colsample_bytree: 0.8
+          min_child_weight: 50
+          reg_alpha: 0.1
+          reg_lambda: 1.0
+          gamma: 0.0
+    outs:
+    - path: models/expresso/model.pkl
+      hash: md5
+      md5: f7ea4aedbc1736f8a42b6246ef7a60e4
+      size: 1618494
+    - path: models/expresso/training_manifest.json
+      hash: md5
+      md5: f041501923fa4ae4ab47fe7dc6083345
+      size: 3888
+  evaluate_expresso:
+    cmd: python -m src.models.evaluate_run --dataset expresso --no-mlflow
+    deps:
+    - path: data/features/expresso/holdout_features.parquet
+      hash: md5
+      md5: 7c4e49635c8935f03a05aba4413177ea
+      size: 28052322
+    - path: models/expresso/model.pkl
+      hash: md5
+      md5: f7ea4aedbc1736f8a42b6246ef7a60e4
+      size: 1618494
+    - path: src/models/evaluate.py
+      hash: md5
+      md5: 821217a62e5ccc59acaf714f96273ee8
+      size: 8615
+    - path: src/models/evaluate_run.py
+      hash: md5
+      md5: 3dff0a10c8d27d90aff03c3108d1aa31
+      size: 5306
+    outs:
+    - path: models/expresso/eval_metrics.json
+      hash: md5
+      md5: 9eda7a20a6cef21d11a7a5ac96ebeb8e
+      size: 656
+  featurize_moroccan:
+    cmd: python -m src.features.run_pipeline --dataset moroccan --no-mlflow
+    deps:
+    - path: configs/moroccan.yaml
+      hash: md5
+      md5: dbfb735f3ec815d2e2c0ddd12aeb4abb
+      size: 445
+    - path: data/raw/moroccan_telecom_churn.csv
+      hash: md5
+      md5: b5a3700e4a8fdb941a783c933f72fc7d
+      size: 294450936
+    - path: src/data/ingestion.py
+      hash: md5
+      md5: 8016de87bcea700ca7c1f9f2310cb930
+      size: 2963
+    - path: src/data/validation.py
+      hash: md5
+      md5: a7e01782716f2644bddafe998785242f
+      size: 2359
+    - path: src/features/build_features.py
+      hash: md5
+      md5: 659108be03ef9ad90ac6de56049eec06
+      size: 25841
+    - path: src/features/run_pipeline.py
+      hash: md5
+      md5: c889458e61841800a76876099df320d6
+      size: 12154
+    - path: src/utils/config.py
+      hash: md5
+      md5: d8142fbcdaa065b769407b5326021684
+      size: 4688
+    params:
+      configs/base.yaml:
+        features:
+          top_pack_min_freq: 200
+          target_enc_smoothing: 20.0
+          target_enc_cv: 5
+          regularity_inactive_threshold: 5
+        training.random_state: 42
+        training.test_size: 0.2
+    outs:
+    - path: data/features/moroccan/feature_manifest.json
+      hash: md5
+      md5: abca8999bb4160d33408ad2be8674164
+      size: 1085
+    - path: data/features/moroccan/feature_pipeline.pkl
+      hash: md5
+      md5: 7a39d58db7398c88dfc53ba825304de8
+      size: 2493
+    - path: data/features/moroccan/feature_stats.csv
+      hash: md5
+      md5: 7ec6cdee7cbcc49c34d718b835e4969a
+      size: 2957
+    - path: data/features/moroccan/holdout_features.parquet
+      hash: md5
+      md5: 1cb39397c13f303b5d04af417b772785
+      size: 31581377
+    - path: data/features/moroccan/train_features.parquet
+      hash: md5
+      md5: 6de7e54b07c83f1fc9ed061b5459d6a7
+      size: 59442790
+  train_moroccan:
+    cmd: python -m src.models.train --dataset moroccan --no-mlflow
+    deps:
+    - path: configs/moroccan.yaml
+      hash: md5
+      md5: dbfb735f3ec815d2e2c0ddd12aeb4abb
+      size: 445
+    - path: data/features/moroccan/train_features.parquet
+      hash: md5
+      md5: 6de7e54b07c83f1fc9ed061b5459d6a7
+      size: 59442790
+    - path: src/models/calibrate.py
+      hash: md5
+      md5: 2201577daf4bc952898b041b2caee3d0
+      size: 4647
+    - path: src/models/evaluate.py
+      hash: md5
+      md5: 821217a62e5ccc59acaf714f96273ee8
+      size: 8615
+    - path: src/models/fitting.py
+      hash: md5
+      md5: b4ed084f2b7e95ea54bbf4304e6d641f
+      size: 3104
+    - path: src/models/train.py
+      hash: md5
+      md5: 720d251039b9cdc721857c2eb91c99c9
+      size: 19549
+    params:
+      configs/base.yaml:
+        catboost:
+          iterations: 1000
+          depth: 7
+          learning_rate: 0.05
+          l2_leaf_reg: 3.0
+          subsample: 0.8
+          colsample_bylevel: 0.8
+          min_data_in_leaf: 50
+        lightgbm:
+          n_estimators: 1000
+          max_depth: 7
+          learning_rate: 0.05
+          num_leaves: 127
+          subsample: 0.8
+          colsample_bytree: 0.8
+          min_child_samples: 100
+          reg_alpha: 0.1
+          reg_lambda: 1.0
+        logistic_regression:
+          C: 0.1
+          max_iter: 1000
+        training:
+          random_state: 42
+          test_size: 0.2
+          cv_folds: 5
+          eval_metric: roc_auc
+          early_stopping_rounds: 50
+        xgboost:
+          n_estimators: 1000
+          max_depth: 7
+          learning_rate: 0.05
+          subsample: 0.8
+          colsample_bytree: 0.8
+          min_child_weight: 50
+          reg_alpha: 0.1
+          reg_lambda: 1.0
+          gamma: 0.0
+    outs:
+    - path: models/moroccan/model.pkl
+      hash: md5
+      md5: f1b7e4edd2fe6e8be40d5d262a08d296
+      size: 2273863
+    - path: models/moroccan/training_manifest.json
+      hash: md5
+      md5: 56ff73acfb075d8df6874b08ddd3ee9a
+      size: 3982
+  evaluate_moroccan:
+    cmd: python -m src.models.evaluate_run --dataset moroccan --no-mlflow
+    deps:
+    - path: data/features/moroccan/holdout_features.parquet
+      hash: md5
+      md5: 1cb39397c13f303b5d04af417b772785
+      size: 31581377
+    - path: models/moroccan/model.pkl
+      hash: md5
+      md5: f1b7e4edd2fe6e8be40d5d262a08d296
+      size: 2273863
+    - path: src/models/evaluate.py
+      hash: md5
+      md5: 821217a62e5ccc59acaf714f96273ee8
+      size: 8615
+    - path: src/models/evaluate_run.py
+      hash: md5
+      md5: 3dff0a10c8d27d90aff03c3108d1aa31
+      size: 5306
+    outs:
+    - path: models/moroccan/eval_metrics.json
+      hash: md5
+      md5: 98a05d84864dc8536aad46dcebe75571
+      size: 637

@@ -1,0 +1,20 @@
+{
+  "dataset": "expresso",
+  "model_name": "xgboost",
+  "calibration_method": "isotonic",
+  "holdout_size": 430810,
+  "churn_rate": 0.18754671432882244,
+  "roc_auc": 0.9316329336697493,
+  "pr_auc": 0.7034456979460316,
+  "brier": 0.08148723440047304,
+  "baseline_brier": 0.15237294427328552,
+  "uncalibrated_brier": 0.11295321583747864,
+  "threshold_youden": 0.19100642398286935,
+  "f1_youden": 0.6774125695054141,
+  "precision_youden": 0.5371706637851636,
+  "recall_youden": 0.9167543349381784,
+  "threshold_f1": 0.3429530201342282,
+  "f1_f1": 0.6986724053356963,
+  "precision_f1": 0.6087743809401254,
+  "recall_f1": 0.8197210292461353
+}

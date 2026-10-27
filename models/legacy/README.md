@@ -16,4 +16,4 @@ These files come from the old flat `models/` layout. They are kept for reference
   slightly optimistic. The tuned XGBoost `gamma` was also never passed to the trained
   model.
 
-Run `dvc repro` to regenerate valid metrics in `models/{expresso,moroccan}/`.
+Valid metrics, produced under the leak-free protocol, are in `models/expresso/` and `models/moroccan/`, and summarised in the main README.

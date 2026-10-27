@@ -1,0 +1,147 @@
+{
+  "dataset": "expresso",
+  "best_model": "xgboost",
+  "cv_roc_auc_mean": 0.9313751257255666,
+  "cv_roc_auc_std": 0.00039338433042404353,
+  "cv_pr_auc_mean": 0.706498369436642,
+  "cv_pr_auc_std": 0.001770806994461846,
+  "n_iterations": 284,
+  "n_features": 38,
+  "feature_cols": [
+    "MONTANT",
+    "FREQUENCE_RECH",
+    "REVENUE",
+    "FREQUENCE",
+    "DATA_VOLUME",
+    "ON_NET",
+    "ORANGE",
+    "TIGO",
+    "ZONE1",
+    "ZONE2",
+    "FREQ_TOP_PACK",
+    "REGION_missing",
+    "MONTANT_missing",
+    "REVENUE_missing",
+    "DATA_VOLUME_missing",
+    "ON_NET_missing",
+    "ORANGE_missing",
+    "TIGO_missing",
+    "ZONE1_missing",
+    "ZONE2_missing",
+    "TOP_PACK_missing",
+    "n_services_absent",
+    "is_ghost_subscriber",
+    "regularity_rate",
+    "recharge_per_freq",
+    "revenue_per_freq",
+    "data_per_freq",
+    "total_calls",
+    "intl_calls",
+    "n_active_call_types",
+    "is_inactive",
+    "has_data",
+    "has_calls",
+    "has_intl_usage",
+    "tenure_ordinal",
+    "REGION_te",
+    "top_pack_freq",
+    "top_pack_te"
+  ],
+  "calibration": {
+    "method": "isotonic",
+    "cv_brier_by_method": {
+      "isotonic": 0.08157471599750886,
+      "sigmoid": 0.08235138379432924
+    }
+  },
+  "thresholds": {
+    "youden": 0.19100642398286935,
+    "f1": 0.3429530201342282
+  },
+  "default_threshold_strategy": "f1",
+  "default_threshold": 0.3429530201342282,
+  "oof_metrics": {
+    "raw_brier": 0.1127928379719207,
+    "calibrated_brier": 0.08157471599750886,
+    "youden_f1": 0.6773027175817941,
+    "youden_precision": 0.5366763162656052,
+    "youden_recall": 0.9177942318581387,
+    "f1_f1": 0.6993187501568711,
+    "f1_precision": 0.6101608567964186,
+    "f1_recall": 0.818991364186281
+  },
+  "all_results": [
+    {
+      "name": "logistic_regression",
+      "roc_auc_mean": 0.9283537406053772,
+      "roc_auc_std": 0.0003445338634412371,
+      "pr_auc_mean": 0.6890937033189565,
+      "pr_auc_std": 0.0015025191900952192,
+      "mean_best_iteration": null,
+      "params": {
+        "C": 0.1,
+        "class_weight": "balanced",
+        "solver": "lbfgs"
+      }
+    },
+    {
+      "name": "xgboost",
+      "roc_auc_mean": 0.9313751257255666,
+      "roc_auc_std": 0.00039338433042404353,
+      "pr_auc_mean": 0.706498369436642,
+      "pr_auc_std": 0.001770806994461846,
+      "mean_best_iteration": 284,
+      "params": {
+        "n_estimators": 1000,
+        "max_depth": 7,
+        "learning_rate": 0.05,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "min_child_weight": 50,
+        "reg_alpha": 0.1,
+        "reg_lambda": 1.0,
+        "gamma": 0.0,
+        "scale_pos_weight": 4.332
+      }
+    },
+    {
+      "name": "lightgbm",
+      "roc_auc_mean": 0.9313618328437302,
+      "roc_auc_std": 0.0003690725864162777,
+      "pr_auc_mean": 0.7056715159988171,
+      "pr_auc_std": 0.0019307931112860896,
+      "mean_best_iteration": 205,
+      "params": {
+        "n_estimators": 1000,
+        "max_depth": 7,
+        "learning_rate": 0.05,
+        "num_leaves": 127,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "min_child_samples": 100,
+        "reg_alpha": 0.1,
+        "reg_lambda": 1.0,
+        "is_unbalance": true,
+        "subsample_freq": 1
+      }
+    },
+    {
+      "name": "catboost",
+      "roc_auc_mean": 0.931358736343277,
+      "roc_auc_std": 0.00038813511302849895,
+      "pr_auc_mean": 0.7065300697556232,
+      "pr_auc_std": 0.0018685188784037733,
+      "mean_best_iteration": 506,
+      "params": {
+        "iterations": 1000,
+        "depth": 7,
+        "learning_rate": 0.05,
+        "l2_leaf_reg": 3.0,
+        "subsample": 0.8,
+        "colsample_bylevel": 0.8,
+        "min_data_in_leaf": 50,
+        "auto_class_weights": "Balanced"
+      }
+    }
+  ]
+}

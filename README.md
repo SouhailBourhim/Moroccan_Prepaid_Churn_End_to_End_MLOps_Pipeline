@@ -189,13 +189,37 @@ The candidates are trained with class weighting (`scale_pos_weight ≈ 36` on Mo
 
 ### Results
 
-Run `dvc repro`, then read `models/{dataset}/eval_metrics.json` and `training_manifest.json`. They hold:
+All numbers below come from `dvc repro` under the protocol above. The holdout rows were never used for training, early stopping, calibration or threshold selection. Full details are in `models/{dataset}/eval_metrics.json` and `training_manifest.json`.
 
-- ROC-AUC, PR-AUC, and Brier before and after calibration, on the holdout
-- precision, recall and F1 at the frozen thresholds
-- the CV comparison of all four candidates
+**Holdout performance of the served model** (XGBoost + isotonic calibration on both datasets):
 
-> The protocol above was introduced together with fixes for several leaks in the earlier version. Numbers from that version, such as an Expresso "holdout" ROC-AUC of 0.933 that had been scored on training rows, are kept in [`models/legacy/`](models/legacy/README.md) with an explanation of each problem. **Don't quote them.** Note that ROC-AUC doesn't depend on class prevalence, so a lower Moroccan score is not explained by its 2.7% churn rate.
+| Metric | Expresso (real) | Moroccan (synthetic) |
+|---|---|---|
+| Holdout size · churn rate | 430,810 · 18.75% | 400,000 · 2.70% |
+| ROC-AUC | **0.9316** | **0.9226** |
+| PR-AUC | **0.703** (base rate 0.188) | **0.320** (base rate 0.027) |
+| Brier (calibrated) | **0.0815** | **0.0213** |
+| Brier (uncalibrated) | 0.1130 | 0.1142 |
+| Brier (always predict the base rate) | 0.1524 | 0.0263 |
+| F1-optimal threshold (frozen in training) | 0.343 | 0.179 |
+| F1 · precision · recall at that threshold | 0.699 · 0.609 · 0.820 | 0.374 · 0.303 · 0.491 |
+
+Calibration is what makes the probabilities usable. On the Moroccan data, the class-weighted model's raw scores have a *worse* Brier score than simply predicting 2.7% for everyone. After isotonic calibration, a predicted 30% means about 30% of those subscribers churn.
+
+**Model comparison (5-fold CV on the training split):**
+
+| Model | Expresso ROC-AUC | Expresso PR-AUC | Moroccan ROC-AUC | Moroccan PR-AUC |
+|---|---|---|---|---|
+| XGBoost | **0.9314** ± 0.0004 | 0.707 | **0.9216** ± 0.0013 | 0.316 |
+| LightGBM | 0.9314 ± 0.0004 | 0.706 | 0.9202 ± 0.0014 | 0.318 |
+| CatBoost | 0.9314 ± 0.0004 | 0.707 | 0.9198 ± 0.0015 | 0.301 |
+| Logistic Regression | 0.9284 ± 0.0003 | 0.689 | 0.8981 ± 0.0016 | 0.170 |
+
+The three boosted models are statistically tied on Expresso. Even logistic regression comes within 0.003 ROC-AUC, which shows how much of the signal the feature engineering captures.
+
+> **Before this protocol.** An earlier version reported an Expresso "holdout" ROC-AUC of 0.933. It had been scored on rows the model was trained on. Removing the leaks moved ranking metrics only slightly (0.933 → 0.932). The bigger gains came from calibration and from frozen thresholds. Those numbers are kept in [`models/legacy/`](models/legacy/README.md) for reference.
+>
+> The Moroccan scores are not comparable to Expresso's in a meaningful way: that dataset is synthetic, derived from Expresso. Its lower PR-AUC reflects its 2.7% base rate; ROC-AUC does not depend on prevalence.
 
 ---
 
