@@ -182,21 +182,38 @@ def _train_ctgan(
     seed: int,
 ) -> Any:
     try:
-        from sdv.metadata import SingleTableMetadata
         from sdv.single_table import CTGANSynthesizer
     except ImportError:
         sys.exit(
             "ERROR: sdv is required.\n"
-            "Install with:  .venv/bin/pip3.11 install sdv\n"
-            "Or run with:   --no-ctgan  to use bootstrap resampling."
+            "Install with:  pip install sdv\n"
+            "Or run with:   --no-ctgan  to resample real Expresso rows instead."
         )
 
     print(f"[2/6] Training CTGAN  epochs={epochs}  batch={batch_size}  "
           f"seed={seed}  rows={len(sample):,} …")
     t0 = time.perf_counter()
 
-    metadata = SingleTableMetadata()
-    metadata.detect_from_dataframe(sample)
+    # CTGAN draws from torch's and numpy's global RNGs; seed both so a run is repeatable.
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+    except ImportError:
+        pass
+    np.random.seed(seed)
+
+    try:
+        # SDV >= 1.15: one Metadata class for single- and multi-table data.
+        from sdv.metadata import Metadata
+
+        metadata = Metadata.detect_from_dataframes({"expresso": sample})
+    except ImportError:
+        # Older SDV (removed in 2.0).
+        from sdv.metadata import SingleTableMetadata
+
+        metadata = SingleTableMetadata()
+        metadata.detect_from_dataframe(sample)
 
     synthesizer = CTGANSynthesizer(
         metadata,
@@ -204,7 +221,12 @@ def _train_ctgan(
         batch_size=batch_size,
         verbose=True,
     )
-    synthesizer.fit(sample)
+    try:
+        synthesizer.fit({"expresso": sample})   # SDV >= 2.0 takes {table_name: DataFrame}
+    except Exception as exc:
+        if "dictionary" not in str(exc):
+            raise
+        synthesizer.fit(sample)                 # older SDV takes the DataFrame
     print(f"    CTGAN training complete  ({time.perf_counter() - t0:.0f}s)")
     return synthesizer
 
@@ -212,7 +234,9 @@ def _train_ctgan(
 def _generate_ctgan(model: Any, n_rows: int) -> pd.DataFrame:
     print(f"[3/6] Sampling {n_rows:,} rows from CTGAN …")
     t0 = time.perf_counter()
-    df: pd.DataFrame = model.sample(n_rows)
+    sampled = model.sample(n_rows)
+    # SDV >= 2.0 returns {table_name: DataFrame}; older versions return the DataFrame.
+    df: pd.DataFrame = next(iter(sampled.values())) if isinstance(sampled, dict) else sampled
     print(f"    Sampling done  ({time.perf_counter() - t0:.1f}s)")
     return df
 
@@ -496,13 +520,15 @@ def _post_process(
 ) -> pd.DataFrame:
     print("[4/6] Applying Moroccan market calibrations …")
     synth = _clean_numerics(synth)
-    synth = _assign_region(synth, rng)
-    synth = _assign_operator(synth, rng)
     synth = _calibrate_monetary(synth, rng)
     synth = _calibrate_data_volume(synth, rng)
+    synth = _calibrate_churn(synth, rng, n_target, allow_replacement)
+    # Relabel after resampling to the target churn rate, so the final file has
+    # exactly the target region / operator / pack / MRG shares.
+    synth = _assign_region(synth, rng)
+    synth = _assign_operator(synth, rng)
     synth = _assign_top_pack(synth, rng)
     synth = _assign_mrg(synth, rng)
-    synth = _calibrate_churn(synth, rng, n_target, allow_replacement)
     return synth
 
 

@@ -1,0 +1,20 @@
+{
+  "dataset": "moroccan",
+  "model_name": "xgboost",
+  "calibration_method": "isotonic",
+  "holdout_size": 400000,
+  "churn_rate": 0.027,
+  "roc_auc": 0.9226628767224316,
+  "pr_auc": 0.31929963800570077,
+  "brier": 0.021336663708552528,
+  "baseline_brier": 0.026271,
+  "uncalibrated_brier": 0.11388327926397324,
+  "threshold_youden": 0.02702702702702703,
+  "f1_youden": 0.22484654869162568,
+  "precision_youden": 0.1291067232779587,
+  "recall_youden": 0.87,
+  "threshold_f1": 0.17518248175182483,
+  "f1_f1": 0.375298748769858,
+  "precision_f1": 0.30245864491275776,
+  "recall_f1": 0.4943518518518519
+}

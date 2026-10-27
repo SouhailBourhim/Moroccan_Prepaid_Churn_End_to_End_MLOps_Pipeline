@@ -54,12 +54,12 @@ def overlay_path(dataset: str, base_path: Path = BASE_CONFIG) -> Path:
 
 def load_config(dataset: str | None = None, path: Path = BASE_CONFIG) -> dict[str, Any]:
     """Load the base config and, when a dataset is given, deep-merge its overlay."""
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         cfg: dict[str, Any] = yaml.safe_load(fh) or {}
     if dataset is not None:
         overlay = overlay_path(dataset, path)
         if overlay.exists():
-            with open(overlay) as fh:
+            with open(overlay, encoding="utf-8") as fh:
                 cfg = _deep_merge(cfg, yaml.safe_load(fh) or {})
     return cfg
 
