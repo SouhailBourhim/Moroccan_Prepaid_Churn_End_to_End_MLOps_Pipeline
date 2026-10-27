@@ -137,3 +137,21 @@ def test_detector_flags_shifted_traffic(
     assert statuses["regularity_rate"] == "DRIFT"
     assert report.prediction_drift is not None
     assert report.prediction_drift.status == "DRIFT"
+
+
+def test_point_mass_at_different_float_widths_is_not_drift() -> None:
+    """An imputed median stored as float64 in the baseline and float32 live is the same value."""
+    import pandas as pd
+
+    from src.monitoring.drift import _as_model_precision
+
+    rng = np.random.default_rng(0)
+    median = 5036.4512345678
+    base = rng.uniform(100, 10_000, 4000)
+    base[:1200] = median                                  # 30 % imputed, float64
+    live = rng.uniform(100, 10_000, 1500).astype(np.float32)
+    live[:450] = np.float32(median)                       # same imputation, float32
+
+    ref = _reference(_as_model_precision(pd.Series(base)))
+    result = _compare("MONTANT", ref, _as_model_precision(pd.Series(live)))
+    assert result.status == "OK"

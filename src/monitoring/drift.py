@@ -114,6 +114,18 @@ def compute_psi(
     return float(np.sum((act_pct - exp_pct) * np.log(act_pct / exp_pct)))
 
 
+def _as_model_precision(values: pd.Series) -> np.ndarray:
+    """Non-null values rounded to float32 — the precision the model actually sees.
+
+    Imputation creates large point masses (e.g. 30 % of rows at the training
+    median). If the baseline and live frames reach the pipeline with different
+    float widths, that mass sits at two values one ulp apart, which a KS test
+    or a bin edge reads as a big shift. Comparing at float32 removes it.
+    """
+    rounded: np.ndarray = values.dropna().to_numpy(dtype=np.float32).astype(np.float64)
+    return rounded
+
+
 def _reference(values: np.ndarray) -> _Reference:
     """Bin edges for one baseline column: per-value for discrete, deciles otherwise."""
     uniq = np.unique(values)
@@ -183,7 +195,7 @@ class DriftDetector:
 
         self._refs: dict[str, _Reference] = {}
         for col in feature_cols:
-            vals = df[col].dropna().to_numpy(dtype=np.float64)
+            vals = _as_model_precision(df[col])
             if len(vals):
                 self._refs[col] = _reference(vals)
 
@@ -217,7 +229,7 @@ class DriftDetector:
 
         results: list[FeatureDriftResult] = []
         for col, ref in self._refs.items():
-            live_vals = live_df[col].dropna().to_numpy(dtype=np.float64)
+            live_vals = _as_model_precision(live_df[col])
             if len(live_vals):
                 results.append(_compare(col, ref, live_vals))
 

@@ -987,7 +987,7 @@ function App() {
                       <tr>
                         <th>Request ID</th>
                         <th>Time</th>
-                        <th>#</th>
+                        <th>Subscriber</th>
                         <th>Probability</th>
                         <th>Decision</th>
                         <th>Latency</th>
@@ -1003,7 +1003,7 @@ function App() {
                               hour: "2-digit", minute: "2-digit",
                             })}
                           </td>
-                          <td>{row.subscriber_idx + 1}</td>
+                          <td className="mono-cell">{row.subscriber_id ?? `#${row.subscriber_idx + 1}`}</td>
                           <td>{formatPct(row.churn_probability, 2)}</td>
                           <td>
                             <span className={row.churn_prediction ? "decision-pill retain" : "decision-pill observe"}>
@@ -1037,13 +1037,13 @@ function App() {
         <section id="drift" className="panel">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">Distribution monitoring · PSI + KS test</p>
+              <p className="eyebrow">Distribution monitoring · PSI + KS statistic</p>
               <h2>Feature drift detection</h2>
             </div>
             {driftData && <DriftStatusBadge status={driftData.overall_status} />}
           </div>
           <p className="panel-description">
-            Compares live /predict input distributions against the training baseline. PSI &lt; 0.1 → OK · 0.1–0.2 → WARN · &gt; 0.2 → DRIFT. KS p-value &lt; 0.05 → WARN · &lt; 0.01 → DRIFT. Status is the stricter of the two metrics.
+            Compares live /predict inputs and the served churn probability against the holdout baseline. PSI (all features) and KS statistic D (continuous features): &lt; 0.1 → OK · 0.1–0.2 → WARN · &gt; 0.2 → DRIFT; the stricter one wins. Binary and count features use PSI only. KS p-values are shown for reference but not used, because they flag trivial shifts at large sample sizes.
           </p>
 
           {driftData ? (
@@ -1080,7 +1080,7 @@ function App() {
                           <th>Feature</th>
                           <th>PSI</th>
                           <th>KS stat</th>
-                          <th>KS p-value</th>
+                          <th>KS p-value (ref.)</th>
                           <th>Live n</th>
                           <th>Status</th>
                         </tr>

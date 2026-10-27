@@ -113,7 +113,6 @@ def build_candidates(cfg: dict[str, Any], scale_pos_weight: float) -> list[Candi
                     max_iter=int(lr.get("max_iter", 1000)),
                     solver="lbfgs",
                     random_state=rs,
-                    n_jobs=-1,
                 )),
             ]),
             params={"C": lr.get("C", 0.1), "class_weight": "balanced", "solver": "lbfgs"},
