@@ -21,6 +21,10 @@ Tuning only reads the training split and never writes a model: run
 `python -m src.models.train --dataset …` (or `dvc repro`) afterwards so the
 tuned params go through the same CV → refit → calibration path as every model.
 
+The boosting-round setting written to the overlay is a ceiling (MAX_ROUNDS);
+training early-stops below it. The mean early-stopped count from the search is
+kept in the tuning results for reference.
+
 Usage
 -----
     python -m src.models.tune --dataset moroccan                  # CatBoost, 50 trials
@@ -195,10 +199,13 @@ def _patch_config(
     """
     cfg: dict[str, Any] = {}
     if config_path.exists():
-        with open(config_path) as fh:
+        with open(config_path, encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh) or {}
 
-    n_est = best_params.get("mean_best_iteration") or 1000
+    # Write a ceiling, not the round count seen during the search: that count was
+    # early-stopped on a subsample, and the full training split usually needs more.
+    # train.py early-stops below this ceiling on an inner split of each CV fold.
+    n_est = MAX_ROUNDS
 
     if model_name == "catboost":
         cfg["catboost"] = {
@@ -223,7 +230,7 @@ def _patch_config(
             "gamma": round(best_params["gamma"], 4),
         }
 
-    with open(config_path, "w") as fh:
+    with open(config_path, "w", encoding="utf-8") as fh:
         fh.write(_OVERLAY_HEADER)
         yaml.dump(cfg, fh, default_flow_style=False, sort_keys=False)
 
@@ -375,7 +382,7 @@ def tune(
     }
 
     results_path = paths.tuning_results(model_name)
-    with open(results_path, "w") as fh:
+    with open(results_path, "w", encoding="utf-8") as fh:
         json.dump(best_params_out, fh, indent=2)
 
     _patch_config(overlay_path(dataset, config_path), best_params_out, model_name)

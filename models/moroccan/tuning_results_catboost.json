@@ -1,0 +1,16 @@
+{
+  "dataset": "moroccan",
+  "depth": 5,
+  "learning_rate": 0.0627594498982787,
+  "l2_leaf_reg": 10.835760817267978,
+  "subsample": 0.8730946468000916,
+  "colsample_bylevel": 0.9363805387724218,
+  "min_data_in_leaf": 58,
+  "mean_best_iteration": 424,
+  "sample_cv_roc_auc": 0.9170351473374634,
+  "full_cv_roc_auc_mean": 0.9211794943881205,
+  "full_cv_roc_auc_std": 0.0014396562043960672,
+  "n_trials_completed": 50,
+  "n_trials_pruned": 2,
+  "sample_size": 400000
+}

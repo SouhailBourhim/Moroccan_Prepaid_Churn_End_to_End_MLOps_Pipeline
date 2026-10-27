@@ -317,7 +317,7 @@ def test_patch_config_updates_catboost_section(tmp_path: pytest.TempPathFactory)
     """_patch_config must rewrite the catboost block without touching other keys."""
     import yaml
 
-    from src.models.tune import _patch_config
+    from src.models.tune import MAX_ROUNDS, _patch_config
 
     cfg_path = tmp_path / "base.yaml"  # type: ignore[operator]
     cfg_path.write_text(
@@ -337,5 +337,6 @@ def test_patch_config_updates_catboost_section(tmp_path: pytest.TempPathFactory)
 
     updated = yaml.safe_load(cfg_path.read_text())
     assert updated["catboost"]["depth"] == 6
-    assert updated["catboost"]["iterations"] == 450
+    # A ceiling for early stopping, not the subsample's round count.
+    assert updated["catboost"]["iterations"] == MAX_ROUNDS
     assert updated["training"]["random_state"] == 42  # unchanged

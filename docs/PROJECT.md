@@ -473,14 +473,16 @@ Four classifiers are evaluated in parallel. Selection rationale is documented in
 
 | Model | Expresso ROC-AUC | Expresso PR-AUC | Rounds | Moroccan ROC-AUC | Moroccan PR-AUC | Rounds |
 |---|---|---|---|---|---|---|
-| **XGBoost** ★ | **0.9314** ± 0.0004 | 0.7065 | 284 | **0.9216** ± 0.0013 | 0.3159 | 376 |
+| **XGBoost** ★ | **0.9314** ± 0.0004 | 0.7065 | 284 | **0.9217** ± 0.0013 | 0.3166 | 459 |
 | LightGBM | 0.9314 ± 0.0004 | 0.7057 | 205 | 0.9202 ± 0.0014 | 0.3175 | 191 |
-| CatBoost | 0.9314 ± 0.0004 | 0.7065 | 506 | 0.9198 ± 0.0015 | 0.3010 | 552 |
+| CatBoost | 0.9314 ± 0.0004 | 0.7065 | 506 | 0.9211 ± 0.0015 | 0.3119 | 603 |
 | Logistic Regression | 0.9284 ± 0.0003 | 0.6891 | — | 0.8981 ± 0.0016 | 0.1699 | — |
 
 "Rounds" is the mean early-stopped boosting round count, used for the final refit. On Expresso the three boosted models are tied, and XGBoost wins on the fifth decimal. Pre-fix CV numbers (`models/legacy/`) were about 0.0002 higher, because early stopping watched the scored fold and target encodings were fit on all rows.
 
-CatBoost on the Moroccan data stopped at its 552-round cap (from the earlier tuning run) without early stopping triggering, so retuning it on the regenerated dataset may help.
+CatBoost was retuned on the regenerated Moroccan dataset: 50 Optuna trials on a 400k-row sample, then a 5-fold check on the full training split. That gave depth 5, learning rate 0.063 and l2_leaf_reg 10.8. Its CV ROC-AUC rose from 0.9198 to 0.9211, but XGBoost still wins model selection.
+
+An earlier version of `tune.py` wrote the subsample's mean early-stopped round count as `iterations` / `n_estimators`. Training treated that as a hard cap, which held CatBoost at 552 rounds and XGBoost at 378. Tuning now writes a 2,000-round ceiling, and early stopping on the full training split chooses the count (603 and 459 rounds).
 
 ### 7.4 Final Model
 
@@ -532,8 +534,8 @@ Tuning on millions of rows with full 5-fold CV × 50 Optuna trials is prohibitiv
 | `min_data_in_leaf` | 50 | [10, 300] |
 | `iterations` | 1000 | 2000 ceiling + early stopping (50 rounds) |
 
-**Best found (Moroccan data):** depth=4, lr=0.0456, l2_leaf_reg=8.92, subsample=0.874, colsample_bylevel=0.757, min_data_in_leaf=180, iterations=552.
-Full CV ROC-AUC: **0.8957 ± 0.0015** (50 trials, 21 pruned).
+**Best found (regenerated Moroccan data):** depth=5, lr=0.0628, l2_leaf_reg=10.84, subsample=0.873, colsample_bylevel=0.936, min_data_in_leaf=58. The mean early-stopped round count on the sample was 424; the overlay stores a 2,000-round ceiling instead.
+Full-split CV ROC-AUC: **0.9212 ± 0.0014** (50 trials, 2 pruned).
 
 ### 8.3 XGBoost Search Space
 
@@ -603,11 +605,11 @@ Holdout results of the served model (XGBoost + isotonic calibration):
 | Metric | Expresso | Moroccan |
 |---|---|---|
 | Holdout size · churn rate | 430,810 · 18.75% | 400,000 · 2.70% |
-| ROC-AUC | 0.9316 | 0.9226 |
-| PR-AUC | 0.7034 | 0.3198 |
-| Brier: calibrated / uncalibrated / base rate | 0.0815 / 0.1130 / 0.1524 | 0.0213 / 0.1142 / 0.0263 |
-| Youden-J threshold · F1 · P · R | 0.191 · 0.677 · 0.537 · 0.917 | 0.029 · 0.225 · 0.129 · 0.870 |
-| F1-optimal threshold · F1 · P · R | 0.343 · 0.699 · 0.609 · 0.820 | 0.179 · 0.374 · 0.303 · 0.491 |
+| ROC-AUC | 0.9316 | 0.9227 |
+| PR-AUC | 0.7034 | 0.3193 |
+| Brier: calibrated / uncalibrated / base rate | 0.0815 / 0.1130 / 0.1524 | 0.0213 / 0.1139 / 0.0263 |
+| Youden-J threshold · F1 · P · R | 0.191 · 0.677 · 0.537 · 0.917 | 0.027 · 0.225 · 0.129 · 0.870 |
+| F1-optimal threshold · F1 · P · R | 0.343 · 0.699 · 0.609 · 0.820 | 0.175 · 0.375 · 0.302 · 0.494 |
 
 The Expresso raw data was verified byte-for-byte (MD5) against the `.dvc` pointers. The Moroccan dataset was regenerated with the current generator (CTGAN, 300 epochs, 2M rows), so its pointer hash changed.
 
@@ -700,14 +702,20 @@ dvc pull                # fetch raw data from DVC remote
 dvc repro               # run featurize → train → evaluate
 ```
 
-### 10.4 DVC Remote Setup (optional)
+### 10.4 DVC Remote Setup
+
+The remote is configured per machine in `.dvc/config.local`, which is gitignored, so no personal path or credential is committed. The maintainer's setup uses a folder that OneDrive syncs:
 
 ```bash
-dvc remote add -d myremote s3://my-bucket/dvc-store
-dvc push                # upload cached artifacts to remote
+dvc remote add --local -d onedrive "C:\Users\<you>\OneDrive\dvc-store\moroccan-prepaid-churn"
+dvc push                # upload raw data, features and models (~0.8 GB)
+dvc status -c           # "Cache and remote are in sync"
+dvc pull                # restore everything on another checkout
 ```
 
-Without a remote, artifacts are cached locally in `.dvc/cache/`.
+Any DVC backend works the same way (S3, GCS, Azure, SSH, a DagsHub repository). This was tested by restoring `Train.csv` into a fresh clone from the remote alone and checking it against the original MD5.
+
+The Expresso files come from a Zindi competition, so keep the remote private. Without a remote, re-download them from Zindi and verify their MD5s against `data/raw/expresso/*.dvc`.
 
 ---
 

@@ -196,13 +196,13 @@ All numbers below come from `dvc repro` under the protocol above. The holdout ro
 | Metric | Expresso (real) | Moroccan (synthetic) |
 |---|---|---|
 | Holdout size · churn rate | 430,810 · 18.75% | 400,000 · 2.70% |
-| ROC-AUC | **0.9316** | **0.9226** |
-| PR-AUC | **0.703** (base rate 0.188) | **0.320** (base rate 0.027) |
+| ROC-AUC | **0.9316** | **0.9227** |
+| PR-AUC | **0.703** (base rate 0.188) | **0.319** (base rate 0.027) |
 | Brier (calibrated) | **0.0815** | **0.0213** |
-| Brier (uncalibrated) | 0.1130 | 0.1142 |
+| Brier (uncalibrated) | 0.1130 | 0.1139 |
 | Brier (always predict the base rate) | 0.1524 | 0.0263 |
-| F1-optimal threshold (frozen in training) | 0.343 | 0.179 |
-| F1 · precision · recall at that threshold | 0.699 · 0.609 · 0.820 | 0.374 · 0.303 · 0.491 |
+| F1-optimal threshold (frozen in training) | 0.343 | 0.175 |
+| F1 · precision · recall at that threshold | 0.699 · 0.609 · 0.820 | 0.375 · 0.302 · 0.494 |
 
 Calibration is what makes the probabilities usable. On the Moroccan data, the class-weighted model's raw scores have a *worse* Brier score than simply predicting 2.7% for everyone. After isotonic calibration, a predicted 30% means about 30% of those subscribers churn.
 
@@ -210,12 +210,12 @@ Calibration is what makes the probabilities usable. On the Moroccan data, the cl
 
 | Model | Expresso ROC-AUC | Expresso PR-AUC | Moroccan ROC-AUC | Moroccan PR-AUC |
 |---|---|---|---|---|
-| XGBoost | **0.9314** ± 0.0004 | 0.707 | **0.9216** ± 0.0013 | 0.316 |
+| XGBoost | **0.9314** ± 0.0004 | 0.707 | **0.9217** ± 0.0013 | 0.317 |
 | LightGBM | 0.9314 ± 0.0004 | 0.706 | 0.9202 ± 0.0014 | 0.318 |
-| CatBoost | 0.9314 ± 0.0004 | 0.707 | 0.9198 ± 0.0015 | 0.301 |
+| CatBoost | 0.9314 ± 0.0004 | 0.707 | 0.9211 ± 0.0015 | 0.312 |
 | Logistic Regression | 0.9284 ± 0.0003 | 0.689 | 0.8981 ± 0.0016 | 0.170 |
 
-The three boosted models are statistically tied on Expresso. Even logistic regression comes within 0.003 ROC-AUC, which shows how much of the signal the feature engineering captures.
+The three boosted models are statistically tied on Expresso. Even logistic regression comes within 0.003 ROC-AUC, which shows how much of the signal the feature engineering captures. On the Moroccan data, XGBoost and CatBoost use hyperparameters tuned with Optuna on that dataset (`configs/moroccan.yaml`).
 
 > **Before this protocol.** An earlier version reported an Expresso "holdout" ROC-AUC of 0.933. It had been scored on rows the model was trained on. Removing the leaks moved ranking metrics only slightly (0.933 → 0.932). The bigger gains came from calibration and from frozen thresholds. Those numbers are kept in [`models/legacy/`](models/legacy/README.md) for reference.
 >
@@ -348,7 +348,8 @@ All settings are listed in [`.env.example`](.env.example).
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. Get the raw data (or put Expresso Train.csv / Test.csv in data/raw/expresso/)
+# 2. Get the raw data: point DVC at a remote, then pull (see "Data and the DVC remote")
+dvc remote add --local -d storage <path-or-url-of-your-remote>
 dvc pull
 
 # 3. Generate the Moroccan dataset (CTGAN: ~15 min on GPU, ~2 h on CPU)
@@ -391,6 +392,28 @@ mlflow ui --backend-store-uri sqlite:///mlruns.db
 ```
 
 `tune` writes the best parameters to `configs/{dataset}.yaml`. It never writes a model; retrain (`dvc repro`) so the tuned parameters go through the same CV, refit and calibration path as every other model.
+
+</details>
+
+<details>
+<summary><b>Data and the DVC remote</b></summary>
+
+Git stores only the `.dvc` pointers and `dvc.lock`. The data itself (raw CSVs, features, trained models) lives in a DVC remote. The remote is configured per machine in `.dvc/config.local`, which is not committed, so no personal path or credential ends up in the repository:
+
+```bash
+# any folder works, e.g. one synced by OneDrive or Google Drive
+dvc remote add --local -d storage "C:\Users\<you>\OneDrive\dvc-store\moroccan-prepaid-churn"
+dvc pull                    # restore data, features and models
+dvc push                    # after dvc repro, upload new outputs
+dvc status -c               # check the cache and the remote are in sync
+```
+
+Without access to a remote, recreate the data from the original sources:
+
+1. **Expresso.** Download `Train.csv` and `Test.csv` from the [Zindi challenge](https://zindi.africa/competitions/expresso-churn-prediction/data). This needs a Zindi account that has accepted the competition terms. Put them in `data/raw/expresso/`, and check their MD5s against `data/raw/expresso/*.dvc`.
+2. **Moroccan.** Run `generate_moroccan_dataset.py`, then `dvc add data/raw/moroccan_telecom_churn.csv`. CTGAN output differs between machines and SDV versions, so expect a new hash.
+
+The Expresso files come from a Zindi competition. Keep the remote private.
 
 </details>
 
