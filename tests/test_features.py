@@ -259,3 +259,98 @@ def test_pipeline_uses_configurable_feature_params(
     assert region.smoothing == pytest.approx(7.0)
     assert top_pack.min_freq == 10
     assert top_pack.smoothing == pytest.approx(7.0)
+
+
+# ── Cross-fitted target encoding (no label leakage on training rows) ──────────
+
+
+def test_target_encoder_fit_transform_is_out_of_fold() -> None:
+    """Flipping one training row's label must not change that row's own encoding."""
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame({"REGION": rng.choice(["A", "B", "C"], 300)})
+    y = pd.Series(rng.integers(0, 2, 300))
+    enc = TargetEncoder(cols=["REGION"], cv=5, random_state=0)
+    base = enc.fit_transform(X, y)["REGION_te"].to_numpy()
+
+    y_flipped = y.copy()
+    y_flipped.iloc[7] = 1 - y_flipped.iloc[7]
+    flipped = TargetEncoder(cols=["REGION"], cv=5, random_state=0).fit_transform(X, y_flipped)
+
+    assert flipped["REGION_te"].iloc[7] == pytest.approx(base[7])
+
+
+def test_target_encoder_transform_uses_full_fit_maps() -> None:
+    rng = np.random.default_rng(1)
+    X = pd.DataFrame({"REGION": rng.choice(["A", "B"], 200)})
+    y = pd.Series(rng.integers(0, 2, 200))
+    enc = TargetEncoder(cols=["REGION"])
+    oof = enc.fit_transform(X, y)["REGION_te"]
+    full = enc.transform(X)["REGION_te"]
+    # Training rows get fold-dependent values; unseen data gets one value per category.
+    assert full.nunique() == 2
+    assert oof.nunique() > 2
+
+
+def test_top_pack_missing_is_its_own_category(sample_df: pd.DataFrame, target: pd.Series) -> None:
+    from src.features.build_features import TopPackEncoder
+
+    enc = TopPackEncoder(min_freq=10).fit(sample_df, target)
+    assert "UNKNOWN" in enc.keep_packs_
+    assert "nan" not in enc.freq_map_
+
+
+def test_top_pack_fit_transform_is_out_of_fold(
+    sample_df: pd.DataFrame, target: pd.Series
+) -> None:
+    from src.features.build_features import TopPackEncoder
+
+    enc = TopPackEncoder(min_freq=10, cv=5)
+    oof = enc.fit_transform(sample_df, target)["top_pack_te"]
+    full = enc.transform(sample_df)["top_pack_te"]
+    assert not np.allclose(oof.to_numpy(), full.to_numpy())
+
+
+def test_pipeline_requires_target(sample_df: pd.DataFrame) -> None:
+    with pytest.raises(ValueError, match="target"):
+        FeaturePipeline().fit_transform(sample_df)
+
+
+# ── Data-driven feature selection ─────────────────────────────────────────────
+
+
+def test_get_model_features_drops_constants_and_duplicates() -> None:
+    from src.features.build_features import get_model_features
+
+    df = pd.DataFrame({
+        "user_id": ["a", "b", "c"],
+        "REGION": ["x", "y", "z"],
+        "REGULARITY": [1.0, 2.0, 3.0],
+        "regularity_rate": [0.1, 0.2, 0.3],
+        "MONTANT_missing": [0, 1, 0],
+        "FREQUENCE_RECH_missing": [0, 1, 0],   # exact duplicate → dropped
+        "mrg_flag": [0, 0, 0],                 # constant → dropped
+        "has_data": [1, 0, 1],
+    })
+    assert get_model_features(df) == ["regularity_rate", "MONTANT_missing", "has_data"]
+
+
+def test_get_model_features_keeps_flags_that_vary() -> None:
+    """mrg_flag is kept when MRG actually varies (e.g. the Moroccan dataset)."""
+    from src.features.build_features import get_model_features
+
+    df = pd.DataFrame({"mrg_flag": [0, 1, 0], "has_data": [1, 1, 0]})
+    assert get_model_features(df) == ["mrg_flag", "has_data"]
+
+
+def test_pipeline_output_has_no_nans_for_all_null_row(
+    sample_df: pd.DataFrame, target: pd.Series
+) -> None:
+    """Serving can receive a row with every field missing (incl. REGULARITY)."""
+    from src.data.ingestion import records_to_frame
+    from src.features.build_features import get_model_features
+
+    pipe = FeaturePipeline()
+    cols = get_model_features(pipe.fit_transform(sample_df, target))
+    empty = records_to_frame([{c: None for c in sample_df.columns if c != "user_id"}])
+    out = pipe.transform(empty)[cols]
+    assert not out.isna().any(axis=None)

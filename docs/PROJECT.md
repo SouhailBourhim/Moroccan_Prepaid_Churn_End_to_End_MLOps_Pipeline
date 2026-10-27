@@ -32,21 +32,19 @@
 
 The project currently includes:
 
-- typed raw-data ingestion and validation for the Expresso dataset and the Moroccan synthetic dataset
-- CTGAN-based synthetic Moroccan prepaid dataset generator (`generate_moroccan_dataset.py`), calibrated to ANRT 2023 market data, with a bootstrap fallback
-- leak-aware sklearn-compatible feature engineering pipeline with `--dataset {expresso,moroccan}` flag
-- candidate training for Logistic Regression, XGBoost, LightGBM, and CatBoost
-- Optuna tuning for CatBoost and XGBoost via `--model {catboost,xgboost}` flag
-- deterministic holdout evaluation with `--dataset moroccan` flag and DVC-tracked metrics
-- post-hoc isotonic calibration (`src/models/calibrate.py`) — reduces Moroccan XGBoost Brier from 0.1273 to 0.0227
-- FastAPI serving (v1.1.0) with `/health`, `/ready`, `/info`, `/predict`, `/logs`, and `/drift`
-- SQLite-backed `PredictionLogger` (`src/api/logger.py`) persisting every `/predict` call in WAL mode
-- `DriftDetector` (`src/monitoring/drift.py`) comparing live inputs against training baseline using PSI and KS 2-sample test
-- Dockerized API runtime with external model and feature artifacts
-- MLflow experiment logging for feature engineering, training, and tuning
-- CI checks for linting, typing, and tests (53 backend tests)
-- React operations dashboard in `dashboard/` including live Monitoring and Drift panels wired to the API
-- production-hardening fixes for final refit, threshold selection, config-driven feature parameters
+- typed raw-data ingestion and validation for both datasets (Expresso and the Moroccan synthetic set)
+- a CTGAN-based synthetic Moroccan prepaid dataset generator (`generate_moroccan_dataset.py`) that keeps the churn signal of the columns it relabels; the `--no-ctgan` fallback samples without replacement
+- a leak-free evaluation protocol (§9.0): the labeled holdout is split off before anything is fit, early stopping uses an inner split, target encodings are cross-fitted, and calibration and thresholds come from out-of-fold predictions
+- per-dataset configs (`configs/{dataset}.yaml` overlays) and artifacts (`data/features/{dataset}/`, `models/{dataset}/`)
+- candidate training for Logistic Regression, XGBoost, LightGBM, and CatBoost, plus Optuna tuning for CatBoost and XGBoost
+- FastAPI serving (v2.0.0) of the calibrated model, with strict request schemas, fail-closed API-key auth, proxy-aware rate limiting, and a SQLite prediction log that records subscriber_id and prunes old rows
+- `DriftDetector` for feature and prediction drift against the holdout baseline (PSI + KS statistic)
+- a Dockerized API with external model and feature artifacts and a persistent prediction-log volume
+- MLflow logging for feature engineering, training, tuning, and evaluation
+- CI for lint, types, tests (including an end-to-end train → evaluate test), dashboard lint/build, and a Docker build with smoke test
+- a React operations dashboard with live Monitoring and Drift panels and API-key support
+
+> Metrics quoted from before the protocol fix are kept in `models/legacy/` and are optimistic; see its README. Regenerate valid numbers with `dvc repro`.
 
 ---
 
@@ -129,7 +127,7 @@ The reference datasets are never used for training. Their role is to identify wh
 
 **Moroccan regions (12 cities, population-weighted):**
 
-Casablanca, Rabat, Fès, Marrakech, Tanger, Agadir, Meknès, Oujda, Laâyoune, Béni Mellal, Khémisset, Tétouan.
+Casablanca, Rabat, Fès, Marrakech, Tanger, Agadir, Meknès, Oujda, Béni Mellal, Tétouan, Settat, Nador.
 
 **Operators (market share):**
 
@@ -144,17 +142,21 @@ Casablanca, Rabat, Fès, Marrakech, Tanger, Agadir, Meknès, Oujda, Laâyoune, B
 1. CTGAN fits on an 80k Expresso sample (300 epochs, batch=10,000) to learn the joint feature distribution.
 2. CTGAN synthesises 2M rows with the learned distribution.
 3. Post-processing calibrates the output to Moroccan market parameters:
-   - Region/operator assignment by population weight
+   - Region assignment at population weight via a churn-preserving (comonotone) mapping; operator at market share (random)
    - ARPU calibration to 27.5 MAD (NaN-preserving — only non-null positive values are scaled)
    - DATA_VOLUME scale × 1.80 for 4G penetration
-   - 20 Moroccan pack names replacing Expresso pack names
-   - MRG VAS rate set to 8% (Moroccan estimate)
+   - 20 Moroccan pack names mapped from Expresso packs (churn-preserving)
+   - MRG VAS rate set to 12% (random; Expresso has no MRG=YES to learn from)
    - Stratified churn resampling to 2.7% (54k churners drawn from augmented churner pool; 1.946M non-churners drawn from non-churner pool)
 4. Output is DVC-tracked at `data/raw/moroccan_telecom_churn.csv`.
 
 **Column schema:** Identical to Expresso except for an added `OPERATOR` column (category). `run_pipeline.py` drops `OPERATOR` before the feature pipeline to keep the feature matrix schema consistent.
 
-**Bootstrap fallback:** `--no-ctgan` skips CTGAN and uses bootstrap resampling of a small Expresso sample, then applies the same post-processing. Useful when SDV is not installed or for quick iteration.
+**Signal-preserving relabelling:** REGION and TOP_PACK are mapped from Expresso categories with a churn-rate-ordered (comonotone) assignment. Each output category gets exactly its target weight, and Expresso categories with similar churn rates land together, so the category–churn association survives. Which city inherits which Senegalese region's churn level is arbitrary. OPERATOR and MRG are random and carry no churn signal. New data users (to reach 74% 4G penetration) are drawn with probability proportional to REGULARITY + 1 rather than uniformly at random.
+
+**What the dataset is:** Expresso's joint distribution, shifted to a 2.7% churn prior and relabelled with Moroccan names and units. It exercises the pipeline on Moroccan-shaped data; it is not evidence about Moroccan churn behaviour.
+
+**Fallback without CTGAN:** `--no-ctgan` skips CTGAN and shuffles the full Expresso Train.csv **without replacement**, then applies the same post-processing. Bootstrapping a small sample with replacement (the old behaviour) put identical rows on both sides of the train/holdout split. Without replacement, the output is capped at about 1.8M rows at 2.7% churn, and the generator warns.
 
 ---
 
@@ -165,28 +167,29 @@ Casablanca, Rabat, Fès, Marrakech, Tanger, Agadir, Meknès, Oujda, Laâyoune, B
 ├── generate_moroccan_dataset.py   # CTGAN Moroccan synthetic data generator
 │
 ├── configs/
-│   └── base.yaml                  # Single source of truth — all params and paths
+│   ├── base.yaml                  # Shared defaults — features, training, hyperparams, API
+│   ├── expresso.yaml              # Per-dataset overlay (tuned params), deep-merged on base
+│   └── moroccan.yaml
 │
 ├── data/
 │   ├── raw/
 │   │   ├── expresso/              # Train.csv, Test.csv (DVC-tracked)
-│   │   └── moroccan_telecom_churn.csv  # Moroccan synthetic (DVC-tracked, 276 MB)
-│   └── features/                  # Generated by featurize stage (DVC-tracked output)
-│       ├── train_features.parquet # 2,154,048 × 39 (38 features + CHURN) [Expresso]
-│       ├── test_features.parquet  # 380,127 × 39 (38 features + user_id) [Expresso]
+│   │   └── moroccan_telecom_churn.csv  # Moroccan synthetic (DVC-tracked)
+│   └── features/{dataset}/        # featurize_{dataset} stage outputs
+│       ├── train_features.parquet # model features + CHURN (cross-fitted target encodings)
+│       ├── holdout_features.parquet  # labeled holdout: user_id + features + CHURN
+│       ├── score_features.parquet # unlabeled Test.csv rows (Expresso only)
 │       ├── feature_pipeline.pkl   # Fitted FeaturePipeline (for inference)
 │       ├── feature_stats.csv      # Per-feature diagnostics
-│       └── feature_manifest.json  # Feature names, counts, churn rate, dataset
+│       └── feature_manifest.json  # Feature names, counts, churn rates, split seed
 │
-├── models/                        # DVC-tracked train stage outputs
-│   ├── best_model.pkl             # {model: CatBoostClassifier, feature_cols: [...]}
-│   ├── best_model_calibrated.pkl  # CalibratedChurnModel (isotonic; gitignored)
-│   ├── training_manifest.json     # CV results for all 4 candidates (DVC metric)
-│   ├── eval_metrics.json          # Expresso holdout metrics (DVC metric)
-│   ├── eval_metrics_moroccan.json            # Moroccan holdout metrics (uncalibrated)
-│   ├── eval_metrics_moroccan_calibrated.json # Moroccan calibration before/after
-│   ├── tuning_results.json        # CatBoost Optuna best params
-│   └── tuning_results_xgboost.json  # XGBoost Optuna best params
+├── models/
+│   ├── {dataset}/
+│   │   ├── model.pkl              # {model: CalibratedChurnModel, feature_cols, thresholds, …}
+│   │   ├── training_manifest.json # CV results, calibration, thresholds, OOF metrics
+│   │   ├── eval_metrics.json      # Holdout metrics at frozen thresholds
+│   │   └── tuning_results_{model}.json
+│   └── legacy/                    # Pre-fix metrics, reference only
 │
 ├── src/
 │   ├── data/
@@ -196,20 +199,25 @@ Casablanca, Rabat, Fès, Marrakech, Tanger, Agadir, Meknès, Oujda, Laâyoune, B
 │   │   ├── build_features.py      # FeaturePipeline + 9 transformers
 │   │   └── run_pipeline.py        # Featurize stage: --dataset {expresso,moroccan}
 │   ├── models/
-│   │   ├── train.py               # 4-candidate CV training entry point
-│   │   ├── tune.py                # Optuna search: --model {catboost,xgboost}
+│   │   ├── fitting.py             # Early stopping on an inner split; refit with fixed rounds
+│   │   ├── train.py               # CV → refit → OOF calibration → frozen thresholds
+│   │   ├── calibrate.py           # CalibratedChurnModel + fit_calibration (OOF scores)
+│   │   ├── tune.py                # Optuna search; writes configs/{dataset}.yaml only
 │   │   ├── evaluate.py            # Metric utils, threshold selection, SHAP
-│   │   ├── evaluate_run.py        # DVC evaluate stage: --dataset {expresso,moroccan}
-│   │   ├── calibrate.py           # Post-hoc calibration: CalibratedChurnModel (isotonic/sigmoid)
-│   │   └── predict.py             # CLI inference on raw CSV
+│   │   ├── evaluate_run.py        # Holdout evaluation with frozen thresholds
+│   │   ├── artifacts.py           # ModelArtifacts + load_artifacts(dataset)
+│   │   └── predict.py             # Batch inference CLI
 │   ├── api/
-│   │   ├── app.py                 # FastAPI app v1.1.0 — /predict /logs /drift /info /health /ready
-│   │   ├── schemas.py             # Pydantic request/response models (incl. LogsResponse, DriftResponse)
-│   │   ├── dependencies.py        # ModelArtifacts + load_artifacts()
-│   │   └── logger.py              # PredictionLogger: SQLite WAL, log_request/summary/recent
+│   │   ├── app.py                 # FastAPI app v2.0.0 — /predict /logs /drift /info /health /ready
+│   │   ├── schemas.py             # Strict Pydantic models (extra fields forbidden)
+│   │   ├── auth.py                # X-API-Key, fails closed
+│   │   ├── rate_limit.py          # Sliding window, trusted-proxy aware, bounded memory
+│   │   ├── dependencies.py        # Re-exports src.models.artifacts
+│   │   └── logger.py              # PredictionLogger: SQLite WAL, windows, retention
 │   ├── monitoring/
-│   │   └── drift.py               # DriftDetector: PSI + KS 2-sample test vs training baseline
+│   │   └── drift.py               # DriftDetector: PSI + KS statistic vs holdout; prediction drift
 │   └── utils/
+│       ├── config.py              # load_config(dataset), dataset_paths(dataset), setup_mlflow
 │       └── logging.py             # loguru setup
 │
 ├── dashboard/
@@ -222,9 +230,12 @@ Casablanca, Rabat, Fès, Marrakech, Tanger, Agadir, Meknès, Oujda, Laâyoune, B
 │   └── vite.config.ts
 │
 ├── tests/
-│   ├── test_features.py           # 18 tests — every transformer + pipeline
-│   ├── test_models.py             # 16 tests — evaluate utilities, build_candidates, tune
-│   └── test_api.py                # 19 tests — all endpoints + 503/422 cases + logs + drift
+│   ├── conftest.py                # make_raw_frame(): synthetic raw rows with real signal
+│   ├── test_features.py           # transformers, cross-fitting, feature selection
+│   ├── test_models.py             # metrics, thresholds, candidates, fitting helpers, tune
+│   ├── test_training_pipeline.py  # config overlays, calibration, end-to-end train → evaluate
+│   ├── test_monitoring.py         # PSI, effect-size statuses, DriftDetector on a real log
+│   └── test_api.py                # endpoints, validation, auth, rate limits, real-pipeline predict
 │
 ├── notebooks/
 │   ├── 01_eda.ipynb               # Expresso EDA
@@ -250,67 +261,47 @@ Casablanca, Rabat, Fès, Marrakech, Tanger, Agadir, Meknès, Oujda, Laâyoune, B
 
 ## 4. Configuration
 
-All hyperparameters, paths, and service settings live in `configs/base.yaml`. No values are hardcoded in source files.
+Configuration is layered:
+
+- `configs/base.yaml` holds the defaults shared by every dataset.
+- `configs/{dataset}.yaml` is an optional overlay, deep-merged on top by `src.utils.config.load_config(dataset)`.
+
+Tuned hyperparameters live in the overlays, so tuning one dataset never changes another.
 
 ```yaml
-data:
-  raw_dir: data/raw/expresso
-  moroccan_raw_file: data/raw/moroccan_telecom_churn.csv   # Moroccan synthetic
-  features_dir: data/features
-
+# configs/base.yaml (abridged)
 features:
   top_pack_min_freq: 200       # packs below this count → "OTHER"
   target_enc_smoothing: 20.0   # James–Stein smoothing factor
+  target_enc_cv: 5             # folds for cross-fitted target encoding
   regularity_inactive_threshold: 5
 
 training:
   random_state: 42
-  test_size: 0.2
+  test_size: 0.2               # labeled holdout, split off before any fitting
   cv_folds: 5
-  eval_metric: roc_auc
-  early_stopping_rounds: 50
+  early_stopping_rounds: 50    # on an inner split of each training fold
 
-# Post-Optuna tuned values (XGBoost on Moroccan data):
-xgboost:
-  n_estimators: 378
-  max_depth: 7
-  learning_rate: 0.025777
-  subsample: 0.6622
-  colsample_bytree: 0.4554
-  min_child_weight: 260
-  reg_alpha: 0.102742
-  reg_lambda: 8.1289
-  gamma: 4.9473
-
-lightgbm:
-  n_estimators: 1000
-  num_leaves: 127
-  learning_rate: 0.05
-  …
-
-# Post-Optuna tuned values (CatBoost on Moroccan data):
-catboost:
-  iterations: 552
-  depth: 4
-  learning_rate: 0.045577
-  l2_leaf_reg: 8.9199
-  subsample: 0.8736
-  colsample_bylevel: 0.7572
-  min_data_in_leaf: 180
-
+xgboost:   { n_estimators: 1000, max_depth: 7, learning_rate: 0.05, gamma: 0.0, … }
+lightgbm:  { n_estimators: 1000, num_leaves: 127, learning_rate: 0.05, … }
+catboost:  { iterations: 1000, depth: 7, learning_rate: 0.05, … }
 logistic_regression: { C: 0.1, max_iter: 1000 }
 
 mlflow:
   experiment_name: moroccan_prepaid_churn
-  tracking_uri: mlruns
+  tracking_uri: sqlite:///mlruns.db
 
 api:
-  host: 0.0.0.0
-  port: 8000
-  workers: 4
+  dataset: expresso            # served model; override with CHURN_DATASET
 ```
 
-After `tune.py` runs, the relevant model section (`catboost` or `xgboost`) is automatically patched with the Optuna-found best parameters and optimal `n_estimators` / `iterations` (derived from early-stopping mean across folds).
+```yaml
+# configs/moroccan.yaml — generated by src.models.tune
+xgboost:  { n_estimators: 378, max_depth: 7, learning_rate: 0.025777, gamma: 4.9473, … }
+catboost: { iterations: 552, depth: 4, learning_rate: 0.045577, … }
+```
+
+`n_estimators` / `iterations` act as ceilings: training early-stops below them and refits with the mean CV round count.
 
 ---
 
@@ -340,7 +331,7 @@ No preprocessing happens in any loader — ingestion is strictly loading.
 - **Domain checks:** `REGULARITY` in [0, 90], no negative usage values, `CHURN` is 0/1 (train only)
 - **Warnings** (non-blocking): unusual missing rates, unexpected category values
 
-`run_pipeline.py` calls validation before any transformation and raises if `report.passed` is False.
+`run_pipeline.py` validates every dataset (Expresso and Moroccan, plus Expresso's unlabeled Test.csv) before any transformation and raises if `report.passed` is False. It also warns about exact duplicate rows, which could otherwise land on both sides of the holdout split.
 
 ---
 
@@ -469,48 +460,40 @@ Four classifiers are evaluated in parallel. Selection rationale is documented in
 
 ### 7.2 Cross-Validation Protocol
 
-- **Stratified 5-fold**, shuffle=True, random_state=42
-- Scored on: ROC-AUC (primary) + PR-AUC (secondary)
-- The feature pipeline is **pre-computed** before CV (run_pipeline.py saves parquet). CV is run on the engineered features, not raw data. This introduces minor target-encoding leakage (smoothing=20 makes it negligible in practice). A future improvement would refit the pipeline inside each fold.
+- **Stratified 5-fold**, shuffle=True, random_state=42, on the **training split only**. The holdout is a separate file and is never loaded here.
+- Scored on ROC-AUC (primary) and PR-AUC (secondary).
+- **Early stopping** (`src/models/fitting.py`) carves a stratified 10% inner split out of each training fold. The fold being scored is never used to choose the number of trees.
+- **Target encodings are cross-fitted.** `FeaturePipeline.fit_transform` encodes each training row from the other folds, so no row's label leaks into its own `REGION_te` / `top_pack_te`.
+- The out-of-fold predictions of every candidate are kept; the winner's feed calibration (§9.0).
+- LightGBM uses `subsample_freq=1`, because without it `subsample` has no effect.
 
 ### 7.3 Results
 
-**Expresso dataset:**
-
-| Model | CV ROC-AUC | σ | CV PR-AUC |
-|-------|-----------|---|----------|
-| **CatBoost** ★ | **0.9316** | 0.0005 | **0.7039** |
-| XGBoost | 0.9314 | 0.0005 | 0.7039 |
-| LightGBM | 0.9313 | 0.0005 | 0.7038 |
-| Logistic Regression | 0.9284 | 0.0005 | 0.6899 |
-
-**Moroccan synthetic dataset:**
-
-| Model | CV ROC-AUC | σ | CV PR-AUC |
-|-------|-----------|---|----------|
-| **XGBoost** ★ | **0.8963** | 0.0017 | **0.2300** |
-| CatBoost | 0.8961 | 0.0016 | 0.2292 |
-| LightGBM | 0.8841 | 0.0015 | 0.1941 |
-| Logistic Regression | 0.8782 | 0.0015 | 0.1979 |
-
-The lower absolute AUC on Moroccan data reflects the much harder 2.7% churn imbalance (vs 18.75%). The three GBDTs remain statistically indistinguishable at the σ level in both datasets.
+Run `dvc repro`. CV results for all four candidates are written to `models/{dataset}/training_manifest.json` (`all_results`). Pre-fix CV numbers are in `models/legacy/` and are slightly optimistic: early stopping watched the scored fold, and target encodings were fit on all rows.
 
 ### 7.4 Final Model
 
-The winning model is **refitted on the full training set** (not a fold) after CV. The artifact saved to `models/best_model.pkl` is:
-```python
-{"model": <classifier>, "feature_cols": [...feature names...]}
-```
+The winner is refit on all training rows. Boosters use the **mean early-stopped round count from CV** and no early stopping. The tuned XGBoost `gamma` is now passed through; it used to be silently dropped. The model is then wrapped with its calibrator. `models/{dataset}/model.pkl` contains:
 
-The final refit path explicitly disables XGBoost early stopping for the full-data refit (no `eval_set` is available at that stage). This prevents a training failure when XGBoost wins model selection.
+```python
+{
+    "model": CalibratedChurnModel(base_model, calibrator, method),
+    "model_name": "catboost",
+    "dataset": "expresso",
+    "feature_cols": [...],
+    "thresholds": {"youden": 0.31, "f1": 0.38},   # chosen on OOF predictions
+    "default_threshold": 0.38,                    # F1-optimal; used by the API
+    "calibration_method": "isotonic",
+}
+```
 
 ### 7.5 Entry Point
 
 ```bash
-python -m src.models.train [--config path] [--no-mlflow]
+python -m src.models.train --dataset {expresso,moroccan} [--config path] [--no-mlflow]
 ```
 
-Outputs: `models/best_model.pkl`, `models/training_manifest.json`.
+Outputs: `models/{dataset}/model.pkl`, `models/{dataset}/training_manifest.json`.
 
 ---
 
@@ -555,7 +538,7 @@ Full CV ROC-AUC: **0.8957 ± 0.0015** (50 trials, 21 pruned).
 | `gamma` | 0.0 | [0.0, 5.0] |
 | `n_estimators` | 1000 | 2000 ceiling + early stopping via eval_set |
 
-XGBoost early stopping is implemented via `eval_set=[(X_val, y_val)]` inside each CV fold. The mean `best_iteration` across folds is used as `n_estimators` for the full-data refit. Early stopping is removed for the final full-data refit (no hold-out fold available).
+Early stopping uses an inner split of each training fold (`fit_with_early_stopping`), never the fold being scored. The mean early-stopped round count across folds is written as `n_estimators` / `iterations`.
 
 **Best found (Moroccan data):** max_depth=7, lr=0.0258, subsample=0.662, colsample_bytree=0.455, min_child_weight=260, reg_alpha=0.103, reg_lambda=8.129, gamma=4.947, n_estimators=378.
 Full CV ROC-AUC: **0.8972 ± 0.0014** (50 trials, 21 pruned).
@@ -564,85 +547,73 @@ Full CV ROC-AUC: **0.8972 ± 0.0014** (50 trials, 21 pruned).
 
 ```bash
 # CatBoost tuning (default)
-python -m src.models.tune --trials 50 --sample 400000
+python -m src.models.tune --dataset moroccan --trials 50 --sample 400000
 
 # XGBoost tuning
-python -m src.models.tune --model xgboost --trials 50 --sample 400000
+python -m src.models.tune --dataset moroccan --model xgboost --trials 50 --sample 400000
 
 # Faster exploration
-python -m src.models.tune --model xgboost --trials 20 --sample 200000
+python -m src.models.tune --dataset expresso --model xgboost --trials 20 --sample 200000
 ```
 
-After tuning, `configs/base.yaml` is patched automatically with the best params, and `models/tuning_results[_xgboost].json` is written. The tuned model replaces `models/best_model.pkl`.
+After tuning, the dataset's overlay `configs/{dataset}.yaml` is rewritten with the best params, and `models/{dataset}/tuning_results_{model}.json` is written. Tuning **never writes a model**. Retrain (`dvc repro` picks up the overlay change) so the tuned params go through the same CV → refit → calibration path as every model.
 
 ---
 
 ## 9. Model Evaluation
 
-### 9.1 Expresso Holdout Metrics
+### 9.0 Protocol
 
-Evaluated on a **deterministic 20% stratified holdout** (430,810 rows) — same split used every time (`random_state=42`).
+| Step | Data it may see | Never sees |
+|------|-----------------|------------|
+| Holdout split (stratified 20%, `run_pipeline.py`) | — | — |
+| Feature pipeline fit | training split | holdout |
+| Target encoding of training rows | other folds (cross-fitted) | the row's own label |
+| CV model selection | training split; early stopping on an inner 10% of each fold | the scored fold |
+| Final refit | all training rows, mean CV round count | holdout |
+| Calibration method + fit | out-of-fold CV predictions of the winner | holdout |
+| Decision thresholds | cross-fitted calibrated OOF predictions | holdout |
+| Holdout evaluation (`evaluate_run.py`) | holdout, thresholds frozen | — |
 
-| Metric | Value |
-|--------|-------|
-| ROC-AUC | **0.9330** |
-| PR-AUC | **0.7071** |
-| Brier score | 0.1119 |
-| Baseline Brier (predict mean) | 0.1520 |
+**What was wrong before:**
 
-PR-AUC of 0.7071 vs a random baseline of 0.1875 means the model is ~3.8× more precise than random at any given recall level.
+1. The Expresso "holdout" was carved out of `train_features.parquet` *after* the final model had been refit on all of it, so it was a training-set score.
+2. The calibrator was fit on rows the base model had trained on.
+3. The calibration method and the Youden/F1 thresholds were picked on the same rows they were scored on.
+4. Early stopping watched the scored CV fold.
+5. Target encodings were fit on all training rows before CV.
 
-### 9.2 Moroccan Synthetic Results
+All five are fixed. The old numbers are in `models/legacy/`.
 
-The Moroccan pipeline uses an 80/20 stratified split. Optuna CV results:
+### 9.1 Holdout Metrics
 
-| Model | Full CV ROC-AUC | Full CV std |
-|-------|----------------|------------|
-| XGBoost (tuned) | **0.8972** | 0.0014 |
-| CatBoost (tuned) | 0.8957 | 0.0015 |
+`python -m src.models.evaluate_run --dataset {expresso,moroccan}` writes `models/{dataset}/eval_metrics.json`:
 
-**Holdout evaluation** (`evaluate_run.py --dataset moroccan`, 400,000 rows, 2.7% churn):
+| Key | Meaning |
+|-----|---------|
+| `roc_auc`, `pr_auc` | Ranking quality of the served (calibrated) model |
+| `brier`, `uncalibrated_brier`, `baseline_brier` | Probability quality, before/after calibration, vs. predicting the base rate |
+| `threshold_{youden,f1}` | Thresholds frozen in training |
+| `f1_*`, `precision_*`, `recall_*` | Measured on the holdout at those frozen thresholds |
 
-| Metric | Uncalibrated | Calibrated (isotonic) |
-|--------|--------------|-----------------------|
-| ROC-AUC | 0.8965 | 0.8963 |
-| PR-AUC | 0.2319 | 0.2312 |
-| Brier score | 0.1273 | **0.0227** |
-| Baseline Brier (predict mean) | — | 0.0263 |
+The Moroccan ROC-AUC is lower than Expresso's, but that is **not** because of the 2.7% churn rate: ROC-AUC does not depend on class prevalence. The gap reflects CTGAN fidelity and, before the generator fix, random relabelling of REGION and TOP_PACK.
 
-XGBoost trained with `scale_pos_weight=36` (inverse of 2.7% churn rate) produces inflated probabilities: uncalibrated Brier 0.1273 vs baseline 0.0263. Isotonic calibration (`src/models/calibrate.py`) reduces this to 0.0227 — better than the no-skill baseline — while leaving ROC-AUC virtually unchanged (rank order is not affected, only probability scale).
+### 9.2 Post-Hoc Calibration (`src/models/calibrate.py`)
 
-The calibrated model uses the Youden-J optimal threshold, which shifts from 0.486 (uncalibrated) to 0.033 (calibrated) due to the rescaled probabilities.
+Class re-weighting (`scale_pos_weight`, `Balanced`, `is_unbalance`) ranks well but inflates probabilities. With `scale_pos_weight ≈ 36` on Moroccan data, the raw Brier score was worse than predicting the base rate.
 
-### 9.5 Post-Hoc Calibration (`src/models/calibrate.py`)
+`fit_calibration(oof_scores, y, cv_folds, random_state)`:
 
-When a model's predicted probabilities are miscalibrated — as with XGBoost trained on severe class imbalance — isotonic regression (or Platt scaling) can correct the scale without affecting ranking.
+1. For each method (isotonic, sigmoid), cross-validates a 1-D calibrator over the winner's **out-of-fold** scores and records the Brier score.
+2. Picks the method with the lower CV Brier score.
+3. Fits it on all OOF scores. This is sklearn's `CalibratedClassifierCV(ensemble=False)` scheme.
+4. Returns the cross-fitted calibrated OOF probabilities, which are used to pick thresholds.
 
-**Implementation:**
-
-```python
-class CalibratedChurnModel:
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        raw = self.base_model.predict_proba(X)[:, 1]
-        calibrated = self.calibrator.predict(raw)   # isotonic
-        return np.column_stack([1.0 - calibrated, calibrated])
-```
-
-Calibration split: 20% of `train_features.parquet` with a different random seed (123) than the holdout split (42), preventing leakage between calibration fitting and holdout evaluation. Both isotonic and sigmoid (Platt) are fitted; the one with the lower Brier score on the test split is saved as `best_model_calibrated.pkl`.
-
-sklearn 1.8+ removed `cv="prefit"` from `CalibratedClassifierCV`. The implementation uses `IsotonicRegression(out_of_bounds="clip")` and `LogisticRegression` directly instead of the sklearn wrapper.
+`CalibratedChurnModel.predict_proba` applies the calibrator to the base model's scores; `predict_raw` exposes the uncalibrated scores.
 
 ### 9.3 Threshold Analysis
 
-Three operating points are computed and stored in `models/eval_metrics.json`:
-
-| Strategy | Threshold | Precision | Recall | F1 | Use case |
-|----------|-----------|-----------|--------|----|---------|
-| Default 0.5 | 0.500 | 0.537 | 0.923 | 0.679 | General default |
-| Youden-J | 0.501 | 0.537 | 0.923 | 0.679 | Balanced sensitivity/specificity |
-| F1-optimal | 0.689 | 0.612 | 0.822 | 0.702 | Maximise F1 on churn class |
-
-The **Youden threshold** is the recommended default for unknown cost ratios. The **80%-recall threshold** is available via `threshold_at_recall(y_true, y_prob, min_recall=0.80)` for campaigns with a fixed recall floor.
+Youden-J and F1-optimal thresholds are chosen in training on cross-fitted calibrated OOF probabilities and stored in the artifact. The F1 threshold is the API default. `evaluate_run.py` only *measures* them on the holdout. `threshold_at_recall(y_true, y_prob, min_recall=0.80)` is available for campaigns with a recall floor. Choose its threshold on OOF or validation data, not on the holdout.
 
 If a requested recall floor is unattainable, `threshold_at_recall()` returns the lowest available threshold so recall is maximised instead of accidentally falling back to the strictest threshold.
 
@@ -654,7 +625,7 @@ If a requested recall floor is unattainable, `threshold_at_recall()` returns the
 2. `n_services_absent` — every absent channel increases churn probability monotonically
 3. `REVENUE` or `revenue_per_freq` — low revenue per transaction is the spend-commitment signal
 
-See `notebooks/06_model_evaluation.ipynb` §7–8 for the full beeswarm plot.
+See `notebooks/06_model_evaluation.ipynb` §7–8 for the full beeswarm plot (it explains `model.base_model`; calibration is a monotone map on top).
 
 ---
 
@@ -662,51 +633,38 @@ See `notebooks/06_model_evaluation.ipynb` §7–8 for the full beeswarm plot.
 
 ### 10.1 DAG
 
+One chain per dataset, with namespaced artifacts so the chains never overwrite each other:
+
 ```
-data/raw/expresso/Train.csv.dvc ──┐
-data/raw/expresso/Test.csv.dvc  ──┤
-                                  ▼
-                            featurize          (src/features/run_pipeline.py)
-                            ─────────
-                            deps:  src/data/, src/features/, raw CSVs
-                            params: configs.features
-                            outs:  data/features/ (parquet, pkl, csv, json)
-                                  │
-                                  ▼
-                               train           (src/models/train.py)
-                               ─────
-                               deps:  src/models/train.py, train_features.parquet
-                               params: configs.training, .xgboost, .lightgbm,
-                                       .catboost, .logistic_regression
-                               outs:  models/best_model.pkl
-                               metrics: models/training_manifest.json
-                                  │
-                                  ▼
-                             evaluate          (src/models/evaluate_run.py)
-                             ────────
-                             deps:  evaluate_run.py, evaluate.py, best_model.pkl,
-                                    train_features.parquet
-                             metrics: models/eval_metrics.json
+featurize_expresso ──► train_expresso ──► evaluate_expresso
+  raw Expresso CSVs      train_features     model.pkl + holdout_features
+  → data/features/       → models/expresso/ → models/expresso/eval_metrics.json
+    expresso/              model.pkl
+                           training_manifest.json
+
+featurize_moroccan ──► train_moroccan ──► evaluate_moroccan
+  moroccan_telecom_churn.csv → data/features/moroccan/ → models/moroccan/
 ```
 
-The Moroccan dataset generation and featurize step runs outside the DVC DAG (called manually). The generated CSV is DVC-tracked via `dvc add`.
+Each train stage depends on its `configs/{dataset}.yaml` overlay, so a tuning run triggers retraining. Generating the Moroccan CSV stays outside the DAG (it needs CTGAN); track it with `dvc add`.
 
 ### 10.2 Key Commands
 
 ```bash
-dvc repro               # re-run changed stages only
-dvc repro --force       # full re-run
-dvc dag                 # print ASCII DAG
-dvc metrics show        # print eval_metrics.json
-dvc metrics diff HEAD~1 # diff metrics vs previous commit
-dvc params diff         # diff config params vs previous commit
-dvc status              # show which stages are out of date
+dvc repro                      # re-run changed stages only (both datasets)
+dvc repro evaluate_moroccan    # one chain
+dvc repro --force              # full re-run
+dvc dag                        # print ASCII DAG
+dvc metrics show               # training manifests + eval metrics
+dvc metrics diff HEAD~1        # diff metrics vs previous commit
+dvc params diff                # diff config params vs previous commit
+dvc status                     # show which stages are out of date
 
 # Track new artifacts
 dvc add data/raw/moroccan_telecom_churn.csv
 ```
 
-The evaluate stage checks that the saved model's `feature_cols` are all present in `data/features/train_features.parquet`. If the feature pipeline changes but artifacts are stale, evaluation fails with an explicit regeneration/retraining message.
+The evaluate stage checks that the model's `feature_cols` are all present in the holdout parquet. If the feature pipeline changes but the artifacts are stale, it fails with an explicit regeneration message.
 
 ### 10.3 Reproducing from Scratch
 
@@ -737,29 +695,28 @@ Without a remote, artifacts are cached locally in `.dvc/cache/`.
 HTTP Request
     │
     ▼
-FastAPI v1.1.0 (src/api/app.py)
-    │
-    ├── GET  /health    → HealthResponse {status: "ok"}
-    ├── GET  /ready     → ReadyResponse | 503 if model not loaded
-    ├── GET  /info      → InfoResponse {model_name, cv_roc_auc_mean, n_features, …}
-    ├── GET  /logs      → LogsResponse  {summary, recent[]}   ← prediction log
-    ├── GET  /drift     → DriftResponse {overall_status, features[]}  ← drift report
-    └── POST /predict   → PredictionResponse
-             │
-             ├─ _to_dataframe()          typed pandas DataFrame
-             ├─ FeaturePipeline.transform()
-             ├─ model.predict_proba()
-             ├─ PredictionLogger.log_request()  ← async-safe SQLite write
-             └─ [{churn_probability, churn_prediction}, …]
+FastAPI v2.0.0 (src/api/app.py)
+    │   X-API-Key (fails closed) · per-client rate limit
+    ├── GET  /health    → {status: "ok"}            (no auth)
+    ├── GET  /ready     → 503 until model loaded
+    ├── GET  /info      → model, dataset, calibration, default threshold, CV metrics
+    ├── GET  /logs      → all-time totals + window stats + recent rows
+    ├── GET  /drift     → feature drift + prediction drift vs holdout
+    └── POST /predict
+             ├─ strict schema validation (unknown fields → 422)
+             ├─ records_to_frame() → FeaturePipeline.transform()
+             ├─ CalibratedChurnModel.predict_proba()
+             ├─ threshold = request.threshold or the model's F1-optimal threshold
+             └─ PredictionLogger.log_request()   ← background task, after the response
 ```
 
 ### 11.2 Startup
 
-On startup (via FastAPI `lifespan`), the following are initialised once:
+On startup (FastAPI `lifespan`):
 
-1. `load_artifacts()` — loads `feature_pipeline.pkl`, `best_model.pkl`, `training_manifest.json` into `app.state.artifacts`. If missing, sets to `None` and returns 503 on model-dependent endpoints.
-2. `PredictionLogger(PREDICTIONS_DB)` — creates `data/predictions.db` with WAL mode and two tables (`prediction_requests`, `prediction_rows`). Always succeeds — the DB is local dev state.
-3. `DriftDetector(pipeline, feature_cols, features_dir, pred_db)` — only created when artifacts are present. Precomputes per-feature PSI bin edges from a 10k-row sample of `train_features.parquet` at startup (fast; ~200 ms). Only initialised when artifacts are loaded.
+1. `load_artifacts(dataset)` (`src/models/artifacts.py`) loads `data/features/{dataset}/feature_pipeline.pkl`, `models/{dataset}/model.pkl`, and the training manifest. The dataset comes from `CHURN_DATASET`, falling back to `api.dataset` in `configs/base.yaml`. If the files are missing, model endpoints return 503.
+2. `PredictionLogger(CHURN_PREDICTIONS_DB)` creates or migrates the SQLite log and prunes rows older than `CHURN_LOG_RETENTION_DAYS` (default 30).
+3. `DriftDetector` samples up to 10k rows of `holdout_features.parquet` as the baseline. The holdout went through exactly the serving transform, unlike the cross-fitted training split. It also scores those rows to get the baseline prediction distribution.
 
 ### 11.3 Request/Response Schema
 
@@ -768,6 +725,7 @@ On startup (via FastAPI `lifespan`), the following are initialised once:
 {
   "subscribers": [
     {
+      "subscriber_id": "sub-000123",
       "REGION": "DAKAR",
       "TENURE": "K > 24 month",
       "MRG": "NO",
@@ -775,19 +733,19 @@ On startup (via FastAPI `lifespan`), the following are initialised once:
       "ON_NET": 388.0,
       "REVENUE": 4251.0
     }
-  ],
-  "threshold": 0.5
+  ]
 }
 ```
 
 **POST /predict response:**
 ```json
 {
+  "request_id": "6f1c…",
   "predictions": [
-    {"churn_probability": 0.049, "churn_prediction": false}
+    {"subscriber_id": "sub-000123", "churn_probability": 0.049, "churn_prediction": false}
   ],
   "model_name": "catboost",
-  "threshold": 0.5,
+  "threshold": 0.38,
   "n_subscribers": 1
 }
 ```
@@ -795,56 +753,48 @@ On startup (via FastAPI `lifespan`), the following are initialised once:
 ### 11.4 Validation
 
 Pydantic enforces:
-- `subscribers`: list, min_length=1, max_length=10,000
-- `threshold`: float in [0.0, 1.0]
-- `REGULARITY`: float in [0, 90] (only field with domain bounds)
-- All other subscriber fields: optional, any float or null
+- `subscribers`: 1–10,000 items; unknown keys anywhere → 422, so a misspelled column cannot silently become a missing value
+- `threshold`: optional float in [0, 1]; defaults to the model's F1-optimal threshold
+- `TENURE`: one of the 11 known bands; `MRG`: `YES` / `NO`
+- `REGULARITY`: [0, 90]; every other numeric field ≥ 0
+- `subscriber_id`: optional string (≤ 128), not a model input
 
-### 11.5 Prediction Logging (`src/api/logger.py`)
+### 11.5 Auth, Rate Limiting, Logging
 
-Every `/predict` call is persisted to `data/predictions.db` (SQLite, WAL mode) via `PredictionLogger.log_request()`. Errors are swallowed — DB failure never causes a prediction response to fail.
-
-**Schema:**
+- **Auth** (`src/api/auth.py`): `CHURN_API_KEYS` (comma-separated) and the `X-API-Key` header, compared in constant time. If no keys are set and `CHURN_AUTH_DISABLED=1` is not set, protected endpoints return **503**, so the API never runs open by accident.
+- **Rate limiting** (`src/api/rate_limit.py`): sliding window per client, keyed on the TCP peer address. `X-Forwarded-For` is honoured only from `CHURN_TRUSTED_PROXIES`, and then the right-most untrusted hop is used. Limits are divided by `API_WORKERS` because state is per process. Idle client buckets are evicted, so spoofed clients cannot grow memory.
+- **Prediction log** (`src/api/logger.py`): every scored row is written after the response is sent:
 
 ```sql
--- One row per request
 prediction_requests (request_id TEXT PK, ts TEXT, model_name TEXT,
                      n_subscribers INT, threshold REAL, latency_ms REAL)
-
--- One row per scored subscriber
-prediction_rows (id INTEGER PK, request_id TEXT FK, subscriber_idx INT,
-                 churn_probability REAL, churn_prediction INT, features_json TEXT)
+prediction_rows (id INTEGER PK, request_id TEXT, subscriber_idx INT,
+                 churn_probability REAL, churn_prediction INT,
+                 features_json TEXT, subscriber_id TEXT)   -- indexed for label joins
 ```
 
-`GET /logs?hours=24&limit=50` returns:
-- `summary`: total_predictions, total_requests, mean_churn_probability, churn_flag_rate, mean_latency_ms for the time window
-- `recent`: the `limit` most recent prediction rows with subscriber-level detail
+`GET /logs?hours=24&limit=50` returns all-time `total_predictions` / `total_requests`. It also returns `predictions_in_window`, `requests_in_window`, mean probability, flag rate, and mean latency for the last `hours`, plus the most recent rows.
 
-### 11.6 Feature Drift Detection (`src/monitoring/drift.py`)
+### 11.6 Drift Detection (`src/monitoring/drift.py`)
 
-`DriftDetector` compares live `/predict` input distributions against the training baseline using two metrics:
+Status is driven by **effect sizes**, not p-values. With thousands of live rows a KS p-value flags shifts far too small to matter, and testing ~40 features at p < 0.05 would raise a false WARN on almost every report.
 
-| Metric | Threshold | Status |
-|--------|-----------|--------|
-| PSI | < 0.1 | OK |
-| PSI | 0.1–0.2 | WARN |
-| PSI | > 0.2 | DRIFT |
-| KS p-value | > 0.05 | OK |
-| KS p-value | 0.01–0.05 | WARN |
-| KS p-value | < 0.01 | DRIFT |
+| Metric | Applies to | OK | WARN | DRIFT |
+|--------|------------|----|------|-------|
+| PSI | every feature | < 0.1 | 0.1–0.2 | > 0.2 |
+| KS statistic D | continuous features | < 0.1 | 0.1–0.2 | > 0.2 |
 
-Per-feature status is the stricter of PSI and KS. Overall status is DRIFT if any feature drifts, WARN if any warn, else OK.
-
-**Implementation:**
-- At startup, samples 10k rows from `train_features.parquet` and precomputes per-feature PSI bin edges (percentile-based, 10 bins).
-- On each `/drift` request, fetches raw subscriber inputs from `prediction_rows.features_json` in the requested time window, transforms them through the same `FeaturePipeline`, and computes PSI + `scipy.stats.ks_2samp` per feature column.
-- Returns `INSUFFICIENT_DATA` when fewer than `min_samples` (default 50) live rows are available.
+- Features with ≤ 12 distinct baseline values (binary flags, counts, ordinals) are treated as discrete: they are binned on their own values and judged by PSI only.
+- The KS p-value is still reported for continuous features, for reference.
+- The served `churn_probability` is compared with the model's scores on the holdout (`prediction_drift`).
+- At most the 50k most recent live rows in the window are read per report.
+- `INSUFFICIENT_DATA` is returned below `min_samples` (default 50).
 
 ### 11.7 Running
 
 ```bash
-uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload   # development
-uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --workers 4  # production
+CHURN_AUTH_DISABLED=1 uvicorn src.api.app:app --port 8000 --reload              # development
+CHURN_API_KEYS=… API_WORKERS=4 uvicorn src.api.app:app --host 0.0.0.0 --workers 4  # production
 ```
 
 Interactive docs: `http://localhost:8000/docs`
@@ -869,8 +819,8 @@ The project includes a Vite React dashboard in `dashboard/` for local model-oper
 - **Feature signals:** high-signal engineered features such as `regularity_rate`, `n_services_absent`, `is_ghost_subscriber`.
 - **Live scoring panel:** editable raw subscriber inputs, score-current action, batch queue, and batch prediction results sent to the FastAPI `/predict` endpoint.
 - **Pipeline view:** DVC stage flow from raw validation through serving.
-- **Monitoring panel:** live prediction traffic KPIs (total predictions, total requests, mean churn probability, mean latency) + recent predictions table, populated from `GET /logs`. Includes a refresh button.
-- **Drift panel:** overall drift status badge (OK / WARN / DRIFT / INSUFFICIENT_DATA) + per-feature PSI mini-bar and KS p-value table, populated from `GET /drift`.
+- **Monitoring panel:** traffic KPIs for the last 24 h (predictions, requests, mean churn probability, mean latency) plus a recent-predictions table, from `GET /logs`. Includes a refresh button.
+- **Drift panel:** overall status badge (OK / WARN / DRIFT / INSUFFICIENT_DATA), a prediction-drift row, and per-feature PSI / KS statistic, from `GET /drift`.
 
 ### 12.2 Running Locally
 
@@ -880,7 +830,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. Override the API target with `VITE_CHURN_API_URL=https://your-api.example.com npm run dev`.
+Open `http://localhost:5173`. Override the API target with `VITE_CHURN_API_URL`. Set `VITE_CHURN_API_KEY` to send `X-API-Key`; it is inlined into the JS bundle, so only use it for local or internal deployments. A rejected key, or a server with auth unconfigured, is reported in the sidebar.
 
 If the API is offline, the dashboard falls back to saved project metrics from the current training/evaluation outputs.
 
@@ -896,73 +846,57 @@ cd dashboard && npm run lint && npm run build
 
 ### 13.1 Multi-Stage Build
 
-**Stage 1 (builder):** `python:3.11-slim` + `build-essential`. Installs only the API-runtime subset of dependencies (`pip install ".[api]"`). Excludes: jupyter, optuna, mlflow, matplotlib, dvc, imbalanced-learn, scipy, sdv, pre-commit, mypy, ruff, pytest.
+**Stage 1 (builder):** `python:3.11-slim` + `build-essential`. Installs `.[${MODEL_EXTRAS}]`, default `api,serve-all`. The `api` extra has no boosting library. Add `serve-xgboost`, `serve-lightgbm`, or `serve-catboost` for the served model's library. It excludes jupyter, optuna, mlflow, matplotlib, dvc, sdv, and the dev tools.
 
-**Stage 2 (runtime):** `python:3.11-slim`. Copies `/venv` from builder. Copies `src/` and `configs/`. Non-root `appuser` runs the process.
+**Stage 2 (runtime):** `python:3.11-slim`. Copies `/venv`, `src/`, `configs/`. Runs as the non-root `appuser`, with a `HEALTHCHECK` on `/health`.
 
-### 13.2 Artifact Volumes
+### 13.2 Volumes
 
 ```yaml
 volumes:
   - ./models:/app/models:ro
   - ./data/features:/app/data/features:ro
+  - predictions-db:/app/data/db          # prediction log survives restarts
 ```
 
-Model artifacts are never baked into the image — update `models/best_model.pkl` without rebuilding.
+Model artifacts are never baked into the image. Retrain, then restart the container.
 
 ### 13.3 Configuration via Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `API_WORKERS` | 1 | uvicorn worker count |
-| `LOG_LEVEL` | info | uvicorn log level |
+| `CHURN_DATASET` | `expresso` | Which dataset's model to serve |
+| `CHURN_API_KEYS` | — | Required unless `CHURN_AUTH_DISABLED=1` |
+| `CHURN_TRUSTED_PROXIES` | — | Proxies allowed to set `X-Forwarded-For` |
+| `CHURN_PREDICTIONS_DB` | `/app/data/db/predictions.db` | Prediction log path |
+| `CHURN_LOG_RETENTION_DAYS` | 30 | Prediction-log retention |
+| `API_WORKERS` | 1 (compose: 4) | uvicorn workers; rate limits are divided by this |
+| `LOG_LEVEL` / `LOG_FORMAT` | info / text | uvicorn level; `json` for structured logs |
 
-### 13.4 Image Size Breakdown
+### 13.4 Image Size
 
-| Component | ~Size |
-|-----------|-------|
-| catboost | ~700 MB |
-| xgboost + lightgbm | ~300 MB |
-| numpy + pandas + scikit-learn | ~350 MB |
-| Python base (3.11-slim) | ~150 MB |
-| fastapi + uvicorn + pydantic + joblib | ~80 MB |
-| pyarrow | ~200 MB |
-| **Total** | **~3.3 GB** |
-
-CatBoost is the floor — there is no meaningful way to reduce the image size without switching serving models.
+With `serve-all`, CatBoost (~700 MB) and XGBoost + LightGBM (~300 MB) dominate a ~3.3 GB image. Installing only the winning model's library (`--build-arg MODEL_EXTRAS=api,serve-xgboost`) removes the other two.
 
 ---
 
 ## 14. CI/CD
 
-Two jobs in `.github/workflows/ci.yml`:
+Four jobs in `.github/workflows/ci.yml`:
 
-**lint-and-type** (fast, no heavy ML deps):
-```bash
-pip install ruff mypy types-PyYAML
-pip install --no-deps -e .
-pip install pandas numpy scikit-learn fastapi pydantic loguru joblib mlflow pyyaml
-ruff check src/
-mypy src/
-```
-
-**test** (full install including catboost):
-```bash
-pip install -e ".[dev]"
-pytest --cov=src --cov-report=xml -q
-```
-
-**Coverage:** 48 backend tests across 3 test files.
+- **lint-and-type**: `ruff check src/ tests/` and `mypy src/`, without the heavy ML dependencies.
+- **test**: `pip install -e ".[dev]"`, then `pytest --cov=src` and an upload to Codecov.
+- **dashboard**: `npm ci`, `npm run lint`, `npm run build`.
+- **docker**: builds the runtime image and smoke-tests it: `/health` is 200, and `/logs` is 503 with no API keys (auth fails closed).
 
 ---
 
 ## 15. MLflow Experiment Tracking
 
 Experiment name: `moroccan_prepaid_churn`
-Tracking URI: `mlruns/` (local, gitignored)
+Tracking URI: `sqlite:///mlruns.db` (local, gitignored), resolved once by `src.utils.config.setup_mlflow`.
 
 ```bash
-mlflow ui --backend-store-uri mlruns   # → http://localhost:5000
+mlflow ui --backend-store-uri sqlite:///mlruns.db   # → http://localhost:5000
 ```
 
 Runs logged:
@@ -971,9 +905,9 @@ Runs logged:
 |----------|-------------|-----------------|
 | `feature_engineering__expresso` | `run_pipeline.py` | n_features, churn_rate_train, pipeline_fit_seconds, top-10 Spearman ρ, artifacts |
 | `feature_engineering__moroccan` | `run_pipeline.py --dataset moroccan` | same as above |
-| `training__catboost` | `train.py` | CV ROC-AUC/PR-AUC for all 4 candidates, best model params |
-| `catboost_optuna_tuning` | `tune.py --model catboost` | n_trials, best params, sample/full CV ROC-AUC, tuning_results.json |
-| `xgboost_optuna_tuning` | `tune.py --model xgboost` | n_trials, best params, sample/full CV ROC-AUC, tuning_results_xgboost.json |
+| `training__{dataset}__{model}` | `train.py` | CV ROC-AUC/PR-AUC for all 4 candidates, calibration method, OOF metrics, thresholds |
+| `evaluate__{dataset}` | `evaluate_run.py` | holdout metrics at frozen thresholds |
+| `{model}_optuna_tuning__{dataset}` | `tune.py` | n_trials, best params, sample/full CV ROC-AUC |
 
 MLflow is optional in all entry points via `--no-mlflow` flag.
 
@@ -981,32 +915,15 @@ MLflow is optional in all entry points via `--no-mlflow` flag.
 
 ## 16. Test Suite
 
-53 backend tests across 3 files plus dashboard lint/build checks.
+| File | Covers |
+|------|--------|
+| `tests/test_features.py` | every transformer, the full pipeline, cross-fitted target encoding (a row's own label never changes its encoding), `UNKNOWN` pack handling, data-driven feature selection |
+| `tests/test_models.py` | metrics and threshold utilities, `build_candidates` (incl. XGBoost `gamma`, LightGBM bagging), inner-split early stopping, refit with fixed rounds, tuning helpers |
+| `tests/test_training_pipeline.py` | config overlays, namespaced paths, MLflow URI resolution, calibration, and an **end-to-end train → evaluate run** on tiny data that checks the artifact, manifest, and frozen thresholds |
+| `tests/test_monitoring.py` | PSI, discrete vs continuous handling, large-sample tiny shifts stay OK, real shifts are flagged, `DriftDetector` on a real SQLite log incl. prediction drift |
+| `tests/test_api.py` | all endpoints; strict validation (unknown field, negative value, bad tenure); default threshold from the artifact; subscriber_id echo/logging; `/logs` windows; retention; fail-closed auth; spoof-proof and bounded rate limiting; `/predict` through a **real** fitted pipeline and calibrated model |
 
-### `tests/test_features.py` (18 tests)
-
-Covers every transformer class individually + the full `FeaturePipeline`:
-- `MissingIndicatorAdder`, `ServiceAbsenceEncoder`, `ZeroImputer`, `MedianImputer`
-- `NumericFeatureEngineer`, `TenureEncoder`, `MRGEncoder`, `TargetEncoder`, `TopPackEncoder`
-- `FeaturePipeline.fit_transform`: full chain, correct feature count, zero nulls
-- Configurable parameters via `top_pack_min_freq`, `target_enc_smoothing`, `regularity_inactive_threshold`
-
-### `tests/test_models.py` (16 tests)
-
-- `compute_metrics`, `optimal_threshold`, `threshold_at_recall`
-- `build_candidates`: 4 candidates with correct names, `scale_pos_weight` logged
-- `_fit_final_model`: disables XGBoost early stopping for full-data refit
-- `_suggest_params`: CatBoost keys present, ranges valid
-- `_patch_config`: catboost section updated, other keys untouched
-
-### `tests/test_api.py` (19 tests)
-
-All tests inject mocks via `app.dependency_overrides`. No real model files or DB files required — `_MockPipeline`, `_MockModel`, `_MockDriftDetector`, and a temp-file `PredictionLogger` cover all dependencies.
-
-- `/health`, `/ready`, `/info` — liveness, readiness, model metadata
-- `/predict` — single, batch, custom threshold, all-null subscriber, 503 without model, 422 on invalid inputs
-- `/logs` — empty DB returns zero totals; after two predict calls returns correct aggregates and row-level detail
-- `/drift` — OK report, INSUFFICIENT_DATA report, 503 without drift detector
+`tests/conftest.py` puts the API in explicit dev-auth mode for each test and provides `make_raw_frame()`, synthetic raw rows with a real churn signal.
 
 ---
 
@@ -1014,7 +931,7 @@ All tests inject mocks via `app.dependency_overrides`. No real model files or DB
 
 | Area | Change | Impact |
 |------|--------|--------|
-| Moroccan data generator | `generate_moroccan_dataset.py` with CTGAN + bootstrap fallback | Enables multi-market development without real subscriber data |
+| Moroccan data generator | `generate_moroccan_dataset.py` with CTGAN + resampling fallback | Enables multi-market development without real subscriber data |
 | Multi-dataset pipeline | `--dataset {expresso,moroccan}` flag in `run_pipeline.py` | Single pipeline serves both datasets; OPERATOR column handled transparently |
 | Multi-model tuning | `--model {catboost,xgboost}` flag in `tune.py` | XGBoost Optuna search implemented with eval_set early stopping |
 | XGBoost refit | Early stopping disabled on full-data refit | Prevents training failure when XGBoost wins model selection |
@@ -1022,29 +939,33 @@ All tests inject mocks via `app.dependency_overrides`. No real model files or DB
 | Feature config | `FeaturePipeline` accepts `top_pack_min_freq`, `target_enc_smoothing`, `regularity_inactive_threshold` from config | Config is the real source of truth |
 | Threshold utility | `threshold_at_recall()` returns lowest threshold if floor unattainable | Maximises recall under impossible campaign constraints |
 | Artifact drift | `evaluate_run.py` fails if saved model features are missing from generated parquet | Makes stale artifacts visible |
-| Moroccan holdout evaluation | `evaluate_run.py --dataset moroccan` → `eval_metrics_moroccan.json` | Formal holdout results (ROC-AUC 0.8965, Brier 0.1273 uncal.) |
-| Post-hoc calibration | `calibrate.py` fits isotonic regression on a separate calibration split | Moroccan Brier: 0.1273 → 0.0227 (below baseline 0.0263); sklearn 1.8+ compatible |
+| Moroccan holdout evaluation | `evaluate_run.py --dataset moroccan` → `eval_metrics_moroccan.json` | Formal holdout results (pre-fix; thresholds were tuned on the holdout — see models/legacy/) |
+| Post-hoc calibration | `calibrate.py` fits isotonic regression on a separate calibration split | Pre-fix: calibrator fit on in-sample scores; superseded by OOF calibration in train.py |
 | Prediction logging | `PredictionLogger` (SQLite WAL) + `/logs` endpoint | Every `/predict` call persisted; traffic and latency queryable via dashboard |
 | Feature drift detection | `DriftDetector` (PSI + KS) + `/drift` endpoint | Detects distribution shift vs training baseline; INSUFFICIENT_DATA guard for cold start |
 | Dashboard monitoring panels | Monitoring panel (KPIs + recent table) + Drift panel (status badge + per-feature table) | Full operational visibility in the React dashboard without external tools |
+| Evaluation protocol | Holdout split before fitting; inner-split early stopping; cross-fitted target encoding; OOF calibration and thresholds | Reported metrics are true out-of-sample estimates (old numbers moved to `models/legacy/`) |
+| Per-dataset artifacts | `data/features/{dataset}/`, `models/{dataset}/`, `configs/{dataset}.yaml`; one DVC chain per dataset | Datasets and tuning runs no longer overwrite each other |
+| Serving the calibrated model | API and CLI load `models/{dataset}/model.pkl` with frozen thresholds | Served probabilities are calibrated; default threshold is meaningful |
+| API hardening | Strict schemas, fail-closed auth, trusted-proxy rate limiting with bounded memory, per-worker limits, subscriber_id, windowed `/logs`, retention, background logging | Closes silent-input, open-by-default, and limiter-bypass gaps |
+| Drift | Effect-size statuses, discrete-feature handling, holdout baseline, prediction drift | Alerts reflect meaningful shifts, not sample size |
+| Generator | Signal-preserving REGION/TOP_PACK mapping; activity-weighted data adoption; no-replacement fallback | Moroccan features keep their signal; no duplicated rows across splits |
 
 ---
 
 ## 18. Design Decisions & Trade-offs
 
-### Why not retrain the pipeline inside each CV fold?
+### Why cross-fit target encoding instead of refitting the pipeline per fold?
 
-The FeaturePipeline includes target encoding for `REGION` and `TOP_PACK`. These are fit on the full training set before CV begins (run_pipeline.py saves the parquet). This introduces minor target-encoding leakage during CV.
-
-With `smoothing=20`, this leakage is negligible in practice. The accepted trade-off: a clean, fast CV loop vs. a correct but 9× slower loop that refits the full pipeline per fold.
+Refitting the whole `FeaturePipeline` inside every CV fold would be about 9× slower. Cross-fitting the two target encoders gives the same guarantee for the only label-dependent steps: no training row is encoded with its own label. That is the scheme `sklearn.preprocessing.TargetEncoder` uses. Unseen data (holdout, live traffic) is encoded with maps fit on the full training split.
 
 ### Why 400k subsample for Optuna?
 
 Full-data Optuna (2M rows × 3-fold × 50 trials) would take 20–40 hours. A stratified 400k subsample finds near-optimal hyperparameters. The best params are then validated on the full dataset before saving — this catches cases where a subsample-optimised setting fails to generalise.
 
-### Why CTGAN over pure bootstrap for the Moroccan dataset?
+### Why CTGAN over resampling real rows for the Moroccan dataset?
 
-Bootstrap resampling preserves the Expresso joint distribution, not the Moroccan one. CTGAN learns the conditional feature distribution from an Expresso seed and can synthesise realistic combinations that differ from the seed distribution when post-processing shifts ARPU, region, and operator assignments. The bootstrap fallback is kept for speed when CTGAN is unavailable.
+Resampling real rows preserves the Expresso joint distribution exactly, but it can only produce as many distinct rows as Expresso has. CTGAN learns the joint distribution from an Expresso seed and can sample any number of new rows. The `--no-ctgan` fallback is kept for speed; it samples without replacement so no row is duplicated across the train/holdout split.
 
 ### Why preserve NaN in ARPU calibration?
 
@@ -1052,15 +973,15 @@ Filling NaN values with 0 before scaling would create phantom low-ARPU records (
 
 ### Why mount artifacts as volumes, not bake into the image?
 
-Model artifacts (~400 MB for best_model.pkl) change on every retraining run. Baking them into the image would require a full 3.3 GB rebuild on each retrain. With volume mounts, `dvc repro` regenerates the model and a container restart picks it up — the image itself never changes.
+Model artifacts (`models/{dataset}/model.pkl`, a few hundred MB) change on every retraining run. Baking them into the image would require a full 3.3 GB rebuild on each retrain. With volume mounts, `dvc repro` regenerates the model and a container restart picks it up — the image itself never changes.
 
 ### Why Logistic Regression as a baseline?
 
-A calibrated linear model with the engineered feature set closes to within 3.2 pp of the best GBDT (0.9284 vs 0.9316 CV ROC-AUC). This confirms the feature engineering is doing most of the work. If LR had scored 0.85, the feature set would need revision. The baseline acts as a quality gate.
+A linear model with the engineered feature set came within 3.2 pp of the best GBDT on the pre-fix CV (0.9284 vs 0.9316 ROC-AUC). This confirms the feature engineering is doing most of the work. If LR had scored 0.85, the feature set would need revision. The baseline acts as a quality gate.
 
 ### Why separate `evaluate_run.py` from `evaluate.py`?
 
-`evaluate.py` is a library of evaluation utilities (metrics, threshold selection, plot functions, SHAP) used by notebooks, the API tests, and training code. `evaluate_run.py` is the DVC pipeline entry point — a thin wrapper that calls the library, takes no arguments, and writes `eval_metrics.json`. Separating them keeps the library reusable and the pipeline stage minimal.
+`evaluate.py` is a library of evaluation utilities (metrics, threshold selection, plot functions, SHAP) used by notebooks, the API tests, and training code. `evaluate_run.py` is the DVC pipeline entry point. It is a thin wrapper that calls the library and writes `models/{dataset}/eval_metrics.json`. Separating them keeps the library reusable and the pipeline stage minimal.
 
 ---
 
@@ -1068,15 +989,16 @@ A calibrated linear model with the engineered feature set closes to within 3.2 p
 
 | Item | Status | Description |
 |------|--------|-------------|
-| Moroccan holdout evaluation | ✅ Done | `evaluate_run.py --dataset moroccan`; `eval_metrics_moroccan.json` |
-| Post-hoc calibration | ✅ Done | Isotonic calibration; Brier 0.1273 → 0.0227 on Moroccan holdout |
+| Leak-free evaluation protocol | ✅ Done | Holdout before fitting, inner-split early stopping, cross-fitted encoding, OOF calibration/thresholds |
+| Post-hoc calibration | ✅ Done | Fit on OOF scores; served by the API |
 | Prediction logging | ✅ Done | `PredictionLogger` SQLite WAL; `/logs` endpoint |
-| Feature drift detection | ✅ Done | `DriftDetector` PSI + KS; `/drift` endpoint |
+| Feature + prediction drift | ✅ Done | `DriftDetector` PSI + KS statistic vs holdout; `/drift` endpoint |
 | Dashboard monitoring panels | ✅ Done | Monitoring (KPIs + table) + Drift (status + per-feature table) |
-| Ground-truth feedback loop | High | Join delayed churn labels back to `prediction_rows` in `data/predictions.db`; compute production ROC-AUC and Brier over rolling windows |
+| Ground-truth feedback loop | High | Join delayed churn labels to `prediction_rows.subscriber_id`; compute production ROC-AUC and Brier over rolling windows |
 | Automated retraining trigger | Medium | Retrain when drift exceeds PSI threshold or production Brier degrades; promote only if candidate beats current model |
 | DVC remote storage | Medium | Configure S3/GCS/Azure remote so the pipeline is reproducible in CI and on new machines |
 | Model registry | Medium | Use MLflow Model Registry to promote models from "staging" to "production" with version tracking and rollback |
-| API hardening | Medium | Authentication, rate limiting, strict CORS, expanded schema bounds, structured JSON logs |
+| API hardening | ✅ Done | Fail-closed auth, proxy-aware rate limiting, strict schemas, JSON logs |
+| Shared rate-limit store | Medium | Redis-backed limiter for exact limits across workers and replicas |
 | Cloud deployment | Medium | Deploy the API and dashboard to Azure Container Apps, AKS, or Render with auto-scaling |
 | Optuna dashboard | Low | `optuna-dashboard` live UI for watching trials during long tuning runs |

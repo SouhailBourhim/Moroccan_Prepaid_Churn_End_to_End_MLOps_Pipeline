@@ -1,2 +1,5 @@
+# DVC-managed model artifacts (one directory per dataset)
+/*/model.pkl
+# Pre-fix artifacts from the old flat layout
 /best_model.pkl
 /best_model_calibrated.pkl

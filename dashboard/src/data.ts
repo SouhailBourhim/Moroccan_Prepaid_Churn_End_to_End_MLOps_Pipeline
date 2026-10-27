@@ -62,11 +62,13 @@ export const featureSignals: FeatureSignal[] = [
 
 export const pipelineStages = [
   "Validate raw schema",
+  "Split off labeled holdout",
   "Add missing indicators",
   "Impute MNAR and MAR fields",
   "Engineer usage features",
-  "Encode tenure, MRG, REGION, TOP_PACK",
+  "Encode tenure, MRG; cross-fit REGION, TOP_PACK",
   "Train candidate models",
+  "Calibrate on out-of-fold scores",
   "Evaluate holdout metrics",
   "Serve FastAPI predictions",
 ];

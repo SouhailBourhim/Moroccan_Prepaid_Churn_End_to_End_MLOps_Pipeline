@@ -2,17 +2,22 @@
 
 Design principles (grounded in cross-dataset EDA — notebooks/01–04):
 - Every transformer is fit on train only and applied identically to train and test.
+- Target encoders are cross-fitted: in fit_transform, each training row is encoded
+  with statistics from the other folds, so no row's own label leaks into its
+  features (the same scheme as sklearn.preprocessing.TargetEncoder). transform()
+  on unseen data uses statistics from the full training set.
 - Missing values are informative (MNAR): _missing flags are added before imputation.
 - Each feature decision is traceable to a specific EDA or cross-dataset finding.
 - All transformers are sklearn-compatible (BaseEstimator + TransformerMixin).
 """
 from __future__ import annotations
 
-import inspect
+import hashlib
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.model_selection import KFold
 from sklearn.utils.validation import check_is_fitted
 
 # ── Column group constants ─────────────────────────────────────────────────────
@@ -28,7 +33,11 @@ MNAR_ZERO_COLS = [
 ]
 
 # MAR: missing but not caused by service absence; impute with training median.
-MAR_MEDIAN_COLS = ["MONTANT", "FREQUENCE_RECH", "REVENUE", "ARPU_SEGMENT", "FREQUENCE"]
+# REGULARITY is never missing in Expresso training data, but the API accepts it as
+# optional; imputing it keeps regularity_rate / is_inactive defined at serving time.
+MAR_MEDIAN_COLS = [
+    "MONTANT", "FREQUENCE_RECH", "REVENUE", "ARPU_SEGMENT", "FREQUENCE", "REGULARITY",
+]
 
 # _missing indicator names produced by MissingIndicatorAdder for MNAR columns.
 # ServiceAbsenceEncoder reads these to count absent service channels.
@@ -284,6 +293,42 @@ class MRGEncoder(BaseEstimator, TransformerMixin):
         return X
 
 
+def _smoothed_encoding(
+    cats: pd.Series, y: np.ndarray, smoothing: float, min_samples: int
+) -> tuple[dict[str, float], float]:
+    """Return ({category: smoothed churn rate}, global churn rate) for one column."""
+    global_mean = float(np.mean(y))
+    stats = (
+        pd.DataFrame({"cat": cats.to_numpy(), "target": y})
+        .groupby("cat")["target"]
+        .agg(["mean", "count"])
+    )
+    lam = 1 / (1 + np.exp(-(stats["count"] - min_samples) / smoothing))
+    mapping: dict[str, float] = (lam * stats["mean"] + (1 - lam) * global_mean).to_dict()
+    return mapping, global_mean
+
+
+def _cross_fit_encoding(
+    cats: pd.Series,
+    y: np.ndarray,
+    smoothing: float,
+    min_samples: int,
+    cv: int,
+    random_state: int,
+) -> np.ndarray:
+    """Out-of-fold target encoding: each row is encoded without its own label."""
+    encoded = np.empty(len(cats), dtype=np.float64)
+    folds = KFold(n_splits=cv, shuffle=True, random_state=random_state)
+    for fit_idx, enc_idx in folds.split(cats):
+        mapping, global_mean = _smoothed_encoding(
+            cats.iloc[fit_idx], y[fit_idx], smoothing, min_samples
+        )
+        encoded[enc_idx] = (
+            cats.iloc[enc_idx].map(mapping).astype(float).fillna(global_mean).to_numpy()
+        )
+    return encoded
+
+
 class TargetEncoder(BaseEstimator, TransformerMixin):
     """James–Stein smoothed target encoding for high-cardinality categoricals.
 
@@ -297,31 +342,34 @@ class TargetEncoder(BaseEstimator, TransformerMixin):
     min_samples observations are pulled toward the global mean, preventing overfit
     on small regions.
 
-    Fit on training data only; unseen categories at inference map to global_mean_.
+    fit_transform() cross-fits over `cv` folds so the encoded training rows never
+    see their own label; transform() uses maps fit on the full training set.
+    Unseen categories at inference map to global_mean_.
     """
 
     def __init__(
-        self, cols: list[str], smoothing: float = 20.0, min_samples: int = 50
+        self,
+        cols: list[str],
+        smoothing: float = 20.0,
+        min_samples: int = 50,
+        cv: int = 5,
+        random_state: int = 42,
     ) -> None:
         self.cols = cols
         self.smoothing = smoothing
         self.min_samples = min_samples
+        self.cv = cv
+        self.random_state = random_state
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> TargetEncoder:
-        self.global_mean_: float = float(y.mean())
+        y_arr = np.asarray(y, dtype=np.float64)
+        self.global_mean_: float = float(y_arr.mean())
         self.maps_: dict[str, dict[str, float]] = {}
-
         for col in self.cols:
-            if col not in X.columns:
-                continue
-            stats = (
-                pd.DataFrame({"cat": X[col].astype(str), "target": y.values})
-                .groupby("cat")["target"]
-                .agg(["mean", "count"])
-            )
-            lam = 1 / (1 + np.exp(-(stats["count"] - self.min_samples) / self.smoothing))
-            self.maps_[col] = (lam * stats["mean"] + (1 - lam) * self.global_mean_).to_dict()
-
+            if col in X.columns:
+                self.maps_[col], _ = _smoothed_encoding(
+                    X[col].astype(str), y_arr, self.smoothing, self.min_samples
+                )
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -331,8 +379,26 @@ class TargetEncoder(BaseEstimator, TransformerMixin):
             if col not in X.columns:
                 continue
             X[f"{col}_te"] = (
-                X[col].astype(str).map(self.maps_[col]).fillna(self.global_mean_)
+                X[col].astype(str).map(self.maps_[col]).astype(float).fillna(self.global_mean_)
             )
+        return X
+
+    def fit_transform(
+        self, X: pd.DataFrame, y: pd.Series | None = None, **fit_params: object
+    ) -> pd.DataFrame:
+        if y is None:
+            raise ValueError("TargetEncoder.fit_transform requires y")
+        self.fit(X, y)
+        if len(X) < self.cv:
+            return self.transform(X)
+        y_arr = np.asarray(y, dtype=np.float64)
+        X = X.copy()
+        for col in self.cols:
+            if col in X.columns:
+                X[f"{col}_te"] = _cross_fit_encoding(
+                    X[col].astype(str), y_arr, self.smoothing, self.min_samples,
+                    self.cv, self.random_state,
+                )
         return X
 
 
@@ -347,47 +413,74 @@ class TopPackEncoder(BaseEstimator, TransformerMixin):
 
     Cross-dataset: plan engagement is a robust predictor across all three datasets
     (Orange voicemail plan, Cell2Cell retention offers, Expresso TOP_PACK).
+
+    Subscribers with no pack are encoded as their own 'UNKNOWN' category. Like
+    TargetEncoder, fit_transform() cross-fits top_pack_te; top_pack_freq uses no
+    labels and is always computed from the full training set.
     """
 
-    def __init__(self, min_freq: int = 200, smoothing: float = 20.0) -> None:
+    MIN_SAMPLES: int = 50
+
+    def __init__(
+        self,
+        min_freq: int = 200,
+        smoothing: float = 20.0,
+        cv: int = 5,
+        random_state: int = 42,
+    ) -> None:
         self.min_freq = min_freq
         self.smoothing = smoothing
+        self.cv = cv
+        self.random_state = random_state
+
+    @staticmethod
+    def _pack_names(X: pd.DataFrame) -> pd.Series:
+        packs = X["TOP_PACK"].astype("object")
+        return packs.where(packs.notna(), "UNKNOWN").astype(str)
+
+    def _collapse(self, packs: pd.Series) -> pd.Series:
+        return packs.where(packs.isin(self.keep_packs_), "OTHER")
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> TopPackEncoder:
         if "TOP_PACK" not in X.columns:
             return self
 
-        pack_ser = X["TOP_PACK"].astype(str).fillna("UNKNOWN")
-        counts = pack_ser.value_counts()
+        packs = self._pack_names(X)
+        counts = packs.value_counts()
         self.keep_packs_: set[str] = set(counts[counts >= self.min_freq].index)
-        self.freq_map_: dict[str, float] = (counts / len(pack_ser)).to_dict()
-
-        pack_collapsed = pack_ser.where(pack_ser.isin(self.keep_packs_), "OTHER")
-        global_mean = float(y.mean())
-        stats = (
-            pd.DataFrame({"cat": pack_collapsed, "target": y.values})
-            .groupby("cat")["target"]
-            .agg(["mean", "count"])
+        self.freq_map_: dict[str, float] = (counts / len(packs)).to_dict()
+        self.te_map_, self.global_mean_ = _smoothed_encoding(
+            self._collapse(packs), np.asarray(y, dtype=np.float64),
+            self.smoothing, self.MIN_SAMPLES,
         )
-        lam = 1 / (1 + np.exp(-(stats["count"] - 50) / self.smoothing))
-        self.te_map_: dict[str, float] = (lam * stats["mean"] + (1 - lam) * global_mean).to_dict()
-        self.global_mean_ = global_mean
-
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        if "TOP_PACK" not in X.columns:
+            return X.copy()
         check_is_fitted(self)
         X = X.copy()
-        if "TOP_PACK" not in X.columns:
-            return X
 
-        pack_ser = X["TOP_PACK"].astype(str).fillna("UNKNOWN")
-        pack_collapsed = pack_ser.where(pack_ser.isin(self.keep_packs_), "OTHER")
-
-        X["top_pack_freq"] = pack_ser.map(self.freq_map_).fillna(0.0)
-        X["top_pack_te"] = pack_collapsed.map(self.te_map_).fillna(self.global_mean_)
-
+        packs = self._pack_names(X)
+        X["top_pack_freq"] = packs.map(self.freq_map_).astype(float).fillna(0.0)
+        X["top_pack_te"] = (
+            self._collapse(packs).map(self.te_map_).astype(float).fillna(self.global_mean_)
+        )
         return X
+
+    def fit_transform(
+        self, X: pd.DataFrame, y: pd.Series | None = None, **fit_params: object
+    ) -> pd.DataFrame:
+        if y is None:
+            raise ValueError("TopPackEncoder.fit_transform requires y")
+        self.fit(X, y)
+        X_out = self.transform(X)
+        if "TOP_PACK" in X.columns and len(X) >= self.cv:
+            X_out["top_pack_te"] = _cross_fit_encoding(
+                self._collapse(self._pack_names(X)), np.asarray(y, dtype=np.float64),
+                self.smoothing, self.MIN_SAMPLES, self.cv, self.random_state,
+            )
+        return X_out
 
 
 # ── Composite pipeline ─────────────────────────────────────────────────────────
@@ -406,6 +499,10 @@ class FeaturePipeline(BaseEstimator, TransformerMixin):
         7. MRGEncoder             — YES/NO → mrg_flag
         8. TargetEncoder(REGION)  — James–Stein smoothed target encoding
         9. TopPackEncoder         — rare collapsing + freq + target encode
+
+    Use fit_transform() on the training set: it returns cross-fitted target
+    encodings for those rows. transform() is for data the pipeline was not fit on
+    (holdout, scoring, live API traffic).
     """
 
     def __init__(
@@ -413,10 +510,14 @@ class FeaturePipeline(BaseEstimator, TransformerMixin):
         top_pack_min_freq: int = 200,
         target_enc_smoothing: float = 20.0,
         regularity_inactive_threshold: float = 5.0,
+        target_enc_cv: int = 5,
+        random_state: int = 42,
     ) -> None:
         self.top_pack_min_freq = top_pack_min_freq
         self.target_enc_smoothing = target_enc_smoothing
         self.regularity_inactive_threshold = regularity_inactive_threshold
+        self.target_enc_cv = target_enc_cv
+        self.random_state = random_state
         self._steps: list[tuple[str, BaseEstimator]] = []
 
     def _build(self) -> None:
@@ -433,27 +534,19 @@ class FeaturePipeline(BaseEstimator, TransformerMixin):
             ("region_te", TargetEncoder(
                 cols=["REGION"],
                 smoothing=self.target_enc_smoothing,
+                cv=self.target_enc_cv,
+                random_state=self.random_state,
             )),
             ("top_pack_enc", TopPackEncoder(
                 min_freq=self.top_pack_min_freq,
                 smoothing=self.target_enc_smoothing,
+                cv=self.target_enc_cv,
+                random_state=self.random_state,
             )),
         ]
 
     def fit(self, X: pd.DataFrame, y: pd.Series) -> FeaturePipeline:
-        self._build()
-        Xt = X.copy()
-        for _name, step in self._steps:
-            # Inspect fit signature: pass y only if the parameter exists.
-            # This avoids fragile co_varnames checks and works correctly when
-            # a step's fit only accepts X (e.g. stateless transformers with y=None default).
-            sig_params = inspect.signature(step.fit).parameters
-            if "y" in sig_params:
-                step.fit(Xt, y)
-            else:
-                step.fit(Xt)
-            Xt = step.transform(Xt)
-        self.fitted_ = True
+        self.fit_transform(X, y)
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -463,45 +556,62 @@ class FeaturePipeline(BaseEstimator, TransformerMixin):
             Xt = step.transform(Xt)
         return Xt
 
-    def fit_transform(self, X: pd.DataFrame, y: pd.Series | None = None) -> pd.DataFrame:
-        return self.fit(X, y).transform(X)
+    def fit_transform(
+        self, X: pd.DataFrame, y: pd.Series | None = None, **fit_params: object
+    ) -> pd.DataFrame:
+        if y is None:
+            raise ValueError("FeaturePipeline requires the target y to fit target encoders")
+        self._build()
+        Xt = X.copy()
+        for _name, step in self._steps:
+            # Every step accepts y; the target encoders use it to cross-fit.
+            Xt = step.fit_transform(Xt, y)
+        self.fitted_ = True
+        return Xt
+
+
+# Columns that are never model inputs: identifiers, the target, raw categoricals
+# that have encoded replacements, and exact re-scalings of a kept feature.
+STRUCTURAL_DROP: frozenset[str] = frozenset({
+    "user_id", "CHURN",
+    "REGION",        # → REGION_te
+    "TENURE",        # → tenure_ordinal + is_new_subscriber
+    "MRG",           # → mrg_flag
+    "TOP_PACK",      # → top_pack_freq + top_pack_te
+    "ARPU_SEGMENT",  # ρ = 1.00 with REVENUE (a rescaling of it)
+    "ARPU_SEGMENT_missing",
+    "REGULARITY",    # regularity_rate = REGULARITY / 90 is kept instead
+})
+
+
+def _column_digest(s: pd.Series) -> str:
+    values = pd.util.hash_pandas_object(s.astype("float64"), index=False).to_numpy()
+    return hashlib.sha1(values.tobytes()).hexdigest()
 
 
 def get_model_features(df: pd.DataFrame) -> list[str]:
-    """Return the final feature list, dropping IDs, raw categoricals, and target.
+    """Return the model feature list for a fitted training frame.
 
-    Dropped columns:
-      user_id               — identifier, not a feature
-      CHURN                 — target variable
-      REGION                — replaced by REGION_te (target encoded)
-      TENURE                — replaced by tenure_ordinal + is_new_subscriber
-      MRG                   — replaced by mrg_flag
-      TOP_PACK              — replaced by top_pack_freq + top_pack_te
-      ARPU_SEGMENT          — perfectly collinear with REVENUE (ρ = 1.00);
-                              ARPU_SEGMENT_missing is also dropped (≡ REVENUE_missing)
+    Beyond STRUCTURAL_DROP, columns are pruned from the data itself rather than
+    from a hard-coded list, so the same code is right for every dataset:
+      - constant columns (e.g. mrg_flag on Expresso, where MRG is always NO);
+      - exact duplicates of an earlier column (e.g. FREQUENCE_RECH_missing is
+        always equal to MONTANT_missing on Expresso) — the first one is kept.
 
-    Redundant features removed after post-engineering correlation audit:
-      REGULARITY            — ρ = 1.00 with regularity_rate (= REGULARITY / 90);
-                              regularity_rate is kept as the normalised [0,1] form
-      is_new_subscriber     — all-zero in dataset; TENURE never has < 2-month bands
-      mrg_flag              — all-zero in dataset; MRG is always NO
-      FREQUENCE_RECH_missing — ρ = 1.00 with MONTANT_missing (always co-missing);
-                              MONTANT_missing is kept
-      FREQUENCE_missing      — ρ = 1.00 with REVENUE_missing; REVENUE_missing kept
-      FREQ_TOP_PACK_missing  — ρ = 1.00 with TOP_PACK_missing; TOP_PACK_missing kept
+    Call this on the training frame only, and reuse the list for every other split.
     """
-    drop = {
-        "user_id", "CHURN",
-        "REGION", "TENURE", "MRG", "TOP_PACK",
-        "ARPU_SEGMENT", "ARPU_SEGMENT_missing",
-        # Perfectly collinear with regularity_rate
-        "REGULARITY",
-        # All-zero in Expresso dataset — zero information content
-        "is_new_subscriber",
-        "mrg_flag",
-        # Perfectly correlated missing-flag duplicates
-        "FREQUENCE_RECH_missing",
-        "FREQUENCE_missing",
-        "FREQ_TOP_PACK_missing",
-    }
-    return [c for c in df.columns if c not in drop]
+    keep: list[str] = []
+    seen: dict[str, str] = {}
+    for col in df.columns:
+        if col in STRUCTURAL_DROP:
+            continue
+        s = df[col]
+        if s.nunique(dropna=False) <= 1:
+            continue
+        digest = _column_digest(s)
+        twin = seen.get(digest)
+        if twin is not None and df[twin].astype("float64").equals(s.astype("float64")):
+            continue
+        seen.setdefault(digest, col)
+        keep.append(col)
+    return keep

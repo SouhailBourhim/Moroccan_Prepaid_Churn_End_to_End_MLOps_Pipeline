@@ -52,6 +52,9 @@ import type { ApiInfo, DriftResponse, LogsResponse, PredictionResponse, ReadySta
 
 const fallbackInfo: ApiInfo = {
   model_name: "catboost",
+  dataset: "expresso",
+  calibration_method: null,
+  default_threshold: 0.5,
   cv_roc_auc_mean: 0.931568,
   cv_roc_auc_std: 0.000512,
   cv_pr_auc_mean: 0.703945,
@@ -59,6 +62,26 @@ const fallbackInfo: ApiInfo = {
 };
 
 const apiBase = import.meta.env.VITE_CHURN_API_URL ?? "http://localhost:8000";
+const apiKey = import.meta.env.VITE_CHURN_API_KEY;
+
+class ApiAuthError extends Error {}
+
+/** fetch() against the churn API, sending X-API-Key when one is configured. */
+async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (apiKey) headers.set("X-API-Key", apiKey);
+  const response = await fetch(`${apiBase}${path}`, { ...init, headers });
+  if (response.status === 401) {
+    throw new ApiAuthError("API key rejected — check VITE_CHURN_API_KEY");
+  }
+  if (response.status === 503) {
+    const body = (await response.clone().json().catch(() => null)) as { detail?: string } | null;
+    if (body?.detail?.includes("authentication is not configured")) {
+      throw new ApiAuthError("API auth is not configured — set CHURN_API_KEYS on the server");
+    }
+  }
+  return response;
+}
 
 const categoricalFields = [
   { key: "REGION", label: "Region", options: ["DAKAR", "THIES", "SAINT-LOUIS", "LOUGA", "KAOLACK", "DIOURBEL"] },
@@ -185,20 +208,21 @@ function App() {
 
     async function loadApiState() {
       try {
-        const ready = await fetch(`${apiBase}/ready`, { signal: controller.signal });
+        const ready = await apiFetch("/ready", { signal: controller.signal });
         if (!ready.ok) throw new Error("Model API is not ready");
 
-        const infoResponse = await fetch(`${apiBase}/info`, { signal: controller.signal });
+        const infoResponse = await apiFetch("/info", { signal: controller.signal });
         if (!infoResponse.ok) throw new Error("Model info endpoint is unavailable");
 
         const info = (await infoResponse.json()) as ApiInfo;
         setApiInfo(info);
+        setThreshold(Number(info.default_threshold.toFixed(2)));
         setReadyState("ready");
-        setApiMessage(`Connected to ${apiBase}`);
+        setApiMessage(`Connected to ${apiBase} (${info.dataset})`);
 
         const [logsRes, driftRes] = await Promise.allSettled([
-          fetch(`${apiBase}/logs?hours=24&limit=20`, { signal: controller.signal }),
-          fetch(`${apiBase}/drift?hours=24`, { signal: controller.signal }),
+          apiFetch("/logs?hours=24&limit=20", { signal: controller.signal }),
+          apiFetch("/drift?hours=24", { signal: controller.signal }),
         ]);
         if (logsRes.status === "fulfilled" && logsRes.value.ok) {
           setLogsData((await logsRes.value.json()) as LogsResponse);
@@ -210,7 +234,11 @@ function App() {
         if (error instanceof DOMException && error.name === "AbortError") return;
         setReadyState("offline");
         setApiInfo(fallbackInfo);
-        setApiMessage("API offline; showing saved project metrics");
+        setApiMessage(
+          error instanceof ApiAuthError
+            ? `${error.message}; showing saved project metrics`
+            : "API offline; showing saved project metrics"
+        );
       }
     }
 
@@ -221,8 +249,8 @@ function App() {
   async function refreshMonitoring() {
     try {
       const [logsRes, driftRes] = await Promise.allSettled([
-        fetch(`${apiBase}/logs?hours=24&limit=20`),
-        fetch(`${apiBase}/drift?hours=24`),
+        apiFetch("/logs?hours=24&limit=20"),
+        apiFetch("/drift?hours=24"),
       ]);
       if (logsRes.status === "fulfilled" && logsRes.value.ok) {
         setLogsData((await logsRes.value.json()) as LogsResponse);
@@ -262,7 +290,7 @@ function App() {
     setIsScoring(true);
     setPrediction(null);
     try {
-      const response = await fetch(`${apiBase}/predict`, {
+      const response = await apiFetch("/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ subscribers: rows.map(toApiSubscriber), threshold }),
@@ -271,9 +299,13 @@ function App() {
       setPrediction((await response.json()) as PredictionResponse);
       setReadyState("ready");
       setApiMessage(`Scored ${rows.length} subscriber${rows.length === 1 ? "" : "s"}`);
-    } catch {
+    } catch (error) {
       setReadyState("offline");
-      setApiMessage("Start the FastAPI service to score live subscribers");
+      setApiMessage(
+        error instanceof ApiAuthError
+          ? error.message
+          : "Start the FastAPI service to score live subscribers"
+      );
     } finally {
       setIsScoring(false);
     }
@@ -906,12 +938,12 @@ function App() {
         <section id="monitoring" className="panel">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">Prediction traffic · last 24 h</p>
+              <p className="eyebrow">Prediction traffic · last {logsData?.summary.window_hours ?? 24} h</p>
               <h2>Live prediction log</h2>
             </div>
             <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
               {logsData && (
-                <span className="tag neutral">{logsData.summary.total_requests} requests</span>
+                <span className="tag neutral">{logsData.summary.total_requests} requests all-time</span>
               )}
               <button className="icon-button" title="Refresh monitoring data" onClick={() => void refreshMonitoring()}>
                 <RefreshCcw aria-hidden="true" />
@@ -923,12 +955,12 @@ function App() {
             <>
               <div className="monitoring-kpis">
                 <div>
-                  <span>Total predictions</span>
-                  <strong>{logsData.summary.total_predictions.toLocaleString()}</strong>
+                  <span>Predictions ({logsData.summary.window_hours} h)</span>
+                  <strong>{logsData.summary.predictions_in_window.toLocaleString()}</strong>
                 </div>
                 <div>
-                  <span>Total requests</span>
-                  <strong>{logsData.summary.total_requests.toLocaleString()}</strong>
+                  <span>Requests ({logsData.summary.window_hours} h)</span>
+                  <strong>{logsData.summary.requests_in_window.toLocaleString()}</strong>
                 </div>
                 <div>
                   <span>Mean churn prob</span>
@@ -955,7 +987,7 @@ function App() {
                       <tr>
                         <th>Request ID</th>
                         <th>Time</th>
-                        <th>#</th>
+                        <th>Subscriber</th>
                         <th>Probability</th>
                         <th>Decision</th>
                         <th>Latency</th>
@@ -971,7 +1003,7 @@ function App() {
                               hour: "2-digit", minute: "2-digit",
                             })}
                           </td>
-                          <td>{row.subscriber_idx + 1}</td>
+                          <td className="mono-cell">{row.subscriber_id ?? `#${row.subscriber_idx + 1}`}</td>
                           <td>{formatPct(row.churn_probability, 2)}</td>
                           <td>
                             <span className={row.churn_prediction ? "decision-pill retain" : "decision-pill observe"}>
@@ -1005,13 +1037,13 @@ function App() {
         <section id="drift" className="panel">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">Distribution monitoring · PSI + KS test</p>
+              <p className="eyebrow">Distribution monitoring · PSI + KS statistic</p>
               <h2>Feature drift detection</h2>
             </div>
             {driftData && <DriftStatusBadge status={driftData.overall_status} />}
           </div>
           <p className="panel-description">
-            Compares live /predict input distributions against the training baseline. PSI &lt; 0.1 → OK · 0.1–0.2 → WARN · &gt; 0.2 → DRIFT. KS p-value &lt; 0.05 → WARN · &lt; 0.01 → DRIFT. Status is the stricter of the two metrics.
+            Compares live /predict inputs and the served churn probability against the holdout baseline. PSI (all features) and KS statistic D (continuous features): &lt; 0.1 → OK · 0.1–0.2 → WARN · &gt; 0.2 → DRIFT; the stricter one wins. Binary and count features use PSI only. KS p-values are shown for reference but not used, because they flag trivial shifts at large sample sizes.
           </p>
 
           {driftData ? (
@@ -1048,13 +1080,16 @@ function App() {
                           <th>Feature</th>
                           <th>PSI</th>
                           <th>KS stat</th>
-                          <th>KS p-value</th>
+                          <th>KS p-value (ref.)</th>
                           <th>Live n</th>
                           <th>Status</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {driftData.features.map((f) => (
+                        {[
+                          ...(driftData.prediction_drift ? [driftData.prediction_drift] : []),
+                          ...driftData.features,
+                        ].map((f) => (
                           <tr key={f.feature}>
                             <td className="feature-cell">{f.feature}</td>
                             <td>
@@ -1074,8 +1109,8 @@ function App() {
                                 <span className="mono-cell">{f.psi.toFixed(4)}</span>
                               </div>
                             </td>
-                            <td className="mono-cell">{f.ks_statistic.toFixed(4)}</td>
-                            <td className="mono-cell">{f.ks_pvalue.toFixed(4)}</td>
+                            <td className="mono-cell">{f.ks_statistic != null ? f.ks_statistic.toFixed(4) : "—"}</td>
+                            <td className="mono-cell">{f.ks_pvalue != null ? f.ks_pvalue.toFixed(4) : "—"}</td>
                             <td>{f.n_live.toLocaleString()}</td>
                             <td><DriftFeatureBadge status={f.status} /></td>
                           </tr>

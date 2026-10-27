@@ -4,8 +4,13 @@ Writes one row to `prediction_requests` and one row per subscriber to
 `prediction_rows` for every /predict call. Designed for local development
 and staging — swap for a cloud sink (BigQuery, S3 parquet) in production.
 
+The database path comes from CHURN_PREDICTIONS_DB (see app.py); in Docker it
+lives on a named volume so the log — and the drift baseline comparison that
+reads it — survives container restarts.
+
 WAL journal mode is enabled so multiple uvicorn workers can write concurrently
-without locking errors.
+without locking errors. Rows older than the retention window are pruned at
+startup.
 """
 from __future__ import annotations
 
@@ -37,12 +42,17 @@ CREATE TABLE IF NOT EXISTS prediction_rows (
     subscriber_idx    INTEGER NOT NULL,
     churn_probability REAL,
     churn_prediction  INTEGER,
-    features_json     TEXT
+    features_json     TEXT,
+    subscriber_id     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_rows_request ON prediction_rows (request_id);
 CREATE INDEX IF NOT EXISTS idx_requests_ts  ON prediction_requests (ts);
 """
+
+
+def _round(value: float | None, digits: int) -> float | None:
+    return round(float(value), digits) if value is not None else None
 
 
 class PredictionLogger:
@@ -53,6 +63,17 @@ class PredictionLogger:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_CREATE_SQL)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add columns introduced after a database was first created."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(prediction_rows)")}
+        if "subscriber_id" not in cols:
+            conn.execute("ALTER TABLE prediction_rows ADD COLUMN subscriber_id TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rows_subscriber ON prediction_rows (subscriber_id)"
+        )
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
@@ -77,6 +98,7 @@ class PredictionLogger:
         probs: list[float],
         predictions: list[bool],
         raw_inputs: list[dict[str, Any]],
+        subscriber_ids: list[str | None] | None = None,
     ) -> None:
         """Persist one request and its per-subscriber scores.
 
@@ -84,6 +106,7 @@ class PredictionLogger:
         prediction response.
         """
         ts = datetime.now(UTC).isoformat()
+        ids = subscriber_ids if subscriber_ids is not None else [None] * len(probs)
         try:
             with self._connect() as conn:
                 conn.execute(
@@ -95,12 +118,12 @@ class PredictionLogger:
                 conn.executemany(
                     "INSERT INTO prediction_rows "
                     "(request_id, subscriber_idx, churn_probability,"
-                    " churn_prediction, features_json) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    " churn_prediction, features_json, subscriber_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     [
-                        (request_id, i, float(p), int(pred), json.dumps(raw))
-                        for i, (p, pred, raw) in enumerate(
-                            zip(probs, predictions, raw_inputs)
+                        (request_id, i, float(p), int(pred), json.dumps(raw), sid)
+                        for i, (p, pred, raw, sid) in enumerate(
+                            zip(probs, predictions, raw_inputs, ids, strict=True)
                         )
                     ],
                 )
@@ -108,10 +131,8 @@ class PredictionLogger:
             _log.error(f"PredictionLogger: failed to write request {request_id}: {exc}")
 
     def summary(self, since_hours: int = 24) -> dict[str, Any]:
-        """Return aggregate stats across all logged predictions."""
-        since = (
-            datetime.now(UTC) - timedelta(hours=since_hours)
-        ).isoformat()
+        """All-time totals plus traffic statistics over the last `since_hours`."""
+        since = (datetime.now(UTC) - timedelta(hours=since_hours)).isoformat()
         with self._connect() as conn:
             total_preds: int = conn.execute(
                 "SELECT COUNT(*) FROM prediction_rows"
@@ -119,35 +140,27 @@ class PredictionLogger:
             total_requests: int = conn.execute(
                 "SELECT COUNT(*) FROM prediction_requests"
             ).fetchone()[0]
-            recent_preds: int = conn.execute(
-                "SELECT COUNT(*) FROM prediction_rows r "
+            win_rows = conn.execute(
+                "SELECT COUNT(*), AVG(r.churn_probability), AVG(r.churn_prediction) "
+                "FROM prediction_rows r "
                 "JOIN prediction_requests q ON r.request_id = q.request_id "
                 "WHERE q.ts >= ?",
                 (since,),
-            ).fetchone()[0]
-            mean_prob_row = conn.execute(
-                "SELECT AVG(churn_probability) FROM prediction_rows"
-            ).fetchone()[0]
-            flag_rate_row = conn.execute(
-                "SELECT AVG(churn_prediction) FROM prediction_rows"
-            ).fetchone()[0]
-            mean_lat_row = conn.execute(
-                "SELECT AVG(latency_ms) FROM prediction_requests"
-            ).fetchone()[0]
+            ).fetchone()
+            win_requests = conn.execute(
+                "SELECT COUNT(*), AVG(latency_ms) FROM prediction_requests WHERE ts >= ?",
+                (since,),
+            ).fetchone()
 
         return {
             "total_predictions": total_preds,
             "total_requests": total_requests,
-            f"predictions_last_{since_hours}h": recent_preds,
-            "mean_churn_probability": (
-                round(float(mean_prob_row), 4) if mean_prob_row is not None else None
-            ),
-            "churn_flag_rate": (
-                round(float(flag_rate_row), 4) if flag_rate_row is not None else None
-            ),
-            "mean_latency_ms": (
-                round(float(mean_lat_row), 2) if mean_lat_row is not None else None
-            ),
+            "window_hours": since_hours,
+            "predictions_in_window": int(win_rows[0]),
+            "requests_in_window": int(win_requests[0]),
+            "mean_churn_probability": _round(win_rows[1], 4),
+            "churn_flag_rate": _round(win_rows[2], 4),
+            "mean_latency_ms": _round(win_requests[1], 2),
         }
 
     def recent(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -156,7 +169,8 @@ class PredictionLogger:
             rows = conn.execute(
                 """
                 SELECT q.request_id, q.ts, q.model_name, q.threshold, q.latency_ms,
-                       r.subscriber_idx, r.churn_probability, r.churn_prediction
+                       r.subscriber_idx, r.subscriber_id, r.churn_probability,
+                       r.churn_prediction
                 FROM prediction_rows r
                 JOIN prediction_requests q ON r.request_id = q.request_id
                 ORDER BY q.ts DESC, r.subscriber_idx ASC
@@ -172,8 +186,35 @@ class PredictionLogger:
                 "threshold": row[3],
                 "latency_ms": row[4],
                 "subscriber_idx": row[5],
-                "churn_probability": row[6],
-                "churn_prediction": bool(row[7]),
+                "subscriber_id": row[6],
+                "churn_probability": row[7],
+                "churn_prediction": bool(row[8]),
             }
             for row in rows
         ]
+
+    def fetch_window(
+        self, since_hours: int, max_rows: int
+    ) -> list[tuple[dict[str, Any], float]]:
+        """Most recent (raw inputs, churn probability) pairs within the window."""
+        since = (datetime.now(UTC) - timedelta(hours=since_hours)).isoformat()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT r.features_json, r.churn_probability FROM prediction_rows r "
+                "JOIN prediction_requests q ON r.request_id = q.request_id "
+                "WHERE q.ts >= ? ORDER BY r.id DESC LIMIT ?",
+                (since, max_rows),
+            ).fetchall()
+        return [(json.loads(row[0]), float(row[1])) for row in rows]
+
+    def prune(self, retention_days: int) -> int:
+        """Delete requests (and their rows) older than `retention_days`. Returns rows removed."""
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
+        with self._connect() as conn:
+            removed = conn.execute(
+                "DELETE FROM prediction_rows WHERE request_id IN "
+                "(SELECT request_id FROM prediction_requests WHERE ts < ?)",
+                (cutoff,),
+            ).rowcount
+            conn.execute("DELETE FROM prediction_requests WHERE ts < ?", (cutoff,))
+        return int(removed)

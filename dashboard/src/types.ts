@@ -1,5 +1,8 @@
 export type ApiInfo = {
   model_name: string;
+  dataset: string;
+  calibration_method: string | null;
+  default_threshold: number;
   cv_roc_auc_mean: number;
   cv_roc_auc_std: number;
   cv_pr_auc_mean: number;
@@ -9,11 +12,13 @@ export type ApiInfo = {
 export type ReadyState = "checking" | "ready" | "offline";
 
 export type Prediction = {
+  subscriber_id: string | null;
   churn_probability: number;
   churn_prediction: boolean;
 };
 
 export type PredictionResponse = {
+  request_id: string;
   predictions: Prediction[];
   model_name: string;
   threshold: number;
@@ -41,8 +46,13 @@ export type SubscriberInput = {
 };
 
 export type LogsSummary = {
+  // All-time counters
   total_predictions: number;
   total_requests: number;
+  // Restricted to the last window_hours
+  window_hours: number;
+  predictions_in_window: number;
+  requests_in_window: number;
   mean_churn_probability: number | null;
   churn_flag_rate: number | null;
   mean_latency_ms: number | null;
@@ -55,6 +65,7 @@ export type RecentPrediction = {
   threshold: number;
   latency_ms: number | null;
   subscriber_idx: number;
+  subscriber_id: string | null;
   churn_probability: number;
   churn_prediction: boolean;
 };
@@ -66,9 +77,10 @@ export type LogsResponse = {
 
 export type FeatureDriftResult = {
   feature: string;
+  kind: "continuous" | "discrete";
   psi: number;
-  ks_statistic: number;
-  ks_pvalue: number;
+  ks_statistic: number | null;
+  ks_pvalue: number | null;
   status: "OK" | "WARN" | "DRIFT";
   n_live: number;
 };
@@ -82,4 +94,5 @@ export type DriftResponse = {
   n_warned: number;
   overall_status: "OK" | "WARN" | "DRIFT" | "INSUFFICIENT_DATA";
   features: FeatureDriftResult[];
+  prediction_drift: FeatureDriftResult | null;
 };

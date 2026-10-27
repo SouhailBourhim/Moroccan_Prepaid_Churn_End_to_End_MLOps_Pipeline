@@ -1,29 +1,41 @@
+# One featurize → train → evaluate chain per dataset. Artifacts are namespaced
+# (data/features/{dataset}/, models/{dataset}/), so the chains never overwrite
+# each other. `dvc repro` runs both; `dvc repro evaluate_expresso` runs one.
 stages:
 
-  featurize:
-    cmd: python -m src.features.run_pipeline --no-mlflow
+  featurize_expresso:
+    cmd: python -m src.features.run_pipeline --dataset expresso --no-mlflow
     deps:
       - src/data/ingestion.py
       - src/data/validation.py
       - src/features/build_features.py
       - src/features/run_pipeline.py
+      - src/utils/config.py
+      - configs/expresso.yaml
       - data/raw/expresso/Train.csv
       - data/raw/expresso/Test.csv
     params:
       - configs/base.yaml:
           - features
+          - training.test_size
+          - training.random_state
     outs:
-      - data/features/train_features.parquet
-      - data/features/test_features.parquet
-      - data/features/feature_pipeline.pkl
-      - data/features/feature_stats.csv
-      - data/features/feature_manifest.json
+      - data/features/expresso/train_features.parquet
+      - data/features/expresso/holdout_features.parquet
+      - data/features/expresso/score_features.parquet
+      - data/features/expresso/feature_pipeline.pkl
+      - data/features/expresso/feature_stats.csv
+      - data/features/expresso/feature_manifest.json
 
-  train:
-    cmd: python -m src.models.train --no-mlflow
+  train_expresso:
+    cmd: python -m src.models.train --dataset expresso --no-mlflow
     deps:
       - src/models/train.py
-      - data/features/train_features.parquet
+      - src/models/fitting.py
+      - src/models/calibrate.py
+      - src/models/evaluate.py
+      - configs/expresso.yaml
+      - data/features/expresso/train_features.parquet
     params:
       - configs/base.yaml:
           - training
@@ -32,18 +44,73 @@ stages:
           - catboost
           - logistic_regression
     outs:
-      - models/best_model.pkl
+      - models/expresso/model.pkl
     metrics:
-      - models/training_manifest.json:
+      - models/expresso/training_manifest.json:
           cache: false
 
-  evaluate:
-    cmd: python -m src.models.evaluate_run
+  evaluate_expresso:
+    cmd: python -m src.models.evaluate_run --dataset expresso --no-mlflow
     deps:
       - src/models/evaluate_run.py
       - src/models/evaluate.py
-      - models/best_model.pkl
-      - data/features/train_features.parquet
+      - models/expresso/model.pkl
+      - data/features/expresso/holdout_features.parquet
     metrics:
-      - models/eval_metrics.json:
+      - models/expresso/eval_metrics.json:
+          cache: false
+
+  featurize_moroccan:
+    cmd: python -m src.features.run_pipeline --dataset moroccan --no-mlflow
+    deps:
+      - src/data/ingestion.py
+      - src/data/validation.py
+      - src/features/build_features.py
+      - src/features/run_pipeline.py
+      - src/utils/config.py
+      - configs/moroccan.yaml
+      - data/raw/moroccan_telecom_churn.csv
+    params:
+      - configs/base.yaml:
+          - features
+          - training.test_size
+          - training.random_state
+    outs:
+      - data/features/moroccan/train_features.parquet
+      - data/features/moroccan/holdout_features.parquet
+      - data/features/moroccan/feature_pipeline.pkl
+      - data/features/moroccan/feature_stats.csv
+      - data/features/moroccan/feature_manifest.json
+
+  train_moroccan:
+    cmd: python -m src.models.train --dataset moroccan --no-mlflow
+    deps:
+      - src/models/train.py
+      - src/models/fitting.py
+      - src/models/calibrate.py
+      - src/models/evaluate.py
+      - configs/moroccan.yaml
+      - data/features/moroccan/train_features.parquet
+    params:
+      - configs/base.yaml:
+          - training
+          - xgboost
+          - lightgbm
+          - catboost
+          - logistic_regression
+    outs:
+      - models/moroccan/model.pkl
+    metrics:
+      - models/moroccan/training_manifest.json:
+          cache: false
+
+  evaluate_moroccan:
+    cmd: python -m src.models.evaluate_run --dataset moroccan --no-mlflow
+    deps:
+      - src/models/evaluate_run.py
+      - src/models/evaluate.py
+      - models/moroccan/model.pkl
+      - data/features/moroccan/holdout_features.parquet
+    metrics:
+      - models/moroccan/eval_metrics.json:
           cache: false
