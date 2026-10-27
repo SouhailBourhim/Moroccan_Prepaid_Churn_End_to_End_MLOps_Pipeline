@@ -1,6 +1,6 @@
 <div align="center">
 
-# 📡 Moroccan Prepaid Churn — End-to-End MLOps Pipeline
+# Moroccan Prepaid Churn — End-to-End MLOps Pipeline
 
 **Predict which prepaid subscribers are about to leave. Every step from raw CSV to a monitored API is reproducible, and the evaluation is free of leakage.**
 
@@ -12,33 +12,33 @@
 ![React](https://img.shields.io/badge/React-dashboard-61DAFB?logo=react&logoColor=black)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
 
-[Why](#-why-this-project) · [Findings](#-what-the-data-says) · [Architecture](#%EF%B8%8F-architecture) · [Evaluation](#-a-leak-free-evaluation-protocol) · [Dashboard](#%EF%B8%8F-operations-dashboard) · [API](#-serving-api) · [Quick start](#-quick-start)
+[Overview](#why-this-project) · [Findings](#what-the-data-says) · [Architecture](#architecture) · [Evaluation](#a-leak-free-evaluation-protocol) · [Dashboard](#operations-dashboard) · [API](#serving-api) · [Quick start](#quick-start)
 
 </div>
 
 ---
 
-## 💡 Why this project
+## Why this project
 
 Prepaid subscribers sign no contract and give no notice. They just stop recharging. A retention team that knows *who* is drifting away can send an offer before the SIM goes silent.
 
 This repository builds that system end to end:
 
-| | |
+| Area | What it covers |
 |---|---|
-| 🧪 **Two markets** | Trains on the real **Expresso** dataset (Senegal, 2.15M subscribers, 18.75% churn) and on a **CTGAN-generated Moroccan** dataset (2M subscribers, 2.7% churn) calibrated to ANRT 2023 market figures. |
-| 🧱 **Engineered signal** | 9 sklearn transformers turn heavy missingness into features. A missing value often *means* "never used this service". |
-| 🏆 **Four candidates** | Logistic Regression, XGBoost, LightGBM, CatBoost, compared with stratified CV. Optuna tunes the boosters. |
-| 🎯 **Honest numbers** | The holdout is split off before anything is fit. Early stopping, calibration and thresholds never see the rows they are scored on. |
-| 🚀 **Production surface** | FastAPI with calibrated probabilities, API-key auth, rate limiting, a prediction log, and feature *and* prediction drift detection. |
-| 📊 **Ops dashboard** | A React UI for live scoring, traffic monitoring and drift alerts. |
-| 🔁 **Reproducible** | `dvc repro` rebuilds both datasets' pipelines; MLflow records every run; CI lints, type-checks, tests, builds the dashboard and smoke-tests the Docker image. |
+| **Two markets** | Trains on the real **Expresso** dataset (Senegal, 2.15M subscribers, 18.75% churn) and on a **CTGAN-generated Moroccan** dataset (2M subscribers, 2.7% churn) calibrated to ANRT 2023 market figures. |
+| **Engineered signal** | 9 sklearn transformers turn heavy missingness into features. A missing value often *means* "never used this service". |
+| **Four candidates** | Logistic Regression, XGBoost, LightGBM, CatBoost, compared with stratified CV. Optuna tunes the boosters. |
+| **Leak-free evaluation** | The holdout is split off before anything is fit. Early stopping, calibration and thresholds never see the rows they are scored on. |
+| **Production surface** | FastAPI with calibrated probabilities, API-key auth, rate limiting, a prediction log, and feature *and* prediction drift detection. |
+| **Operations dashboard** | A React UI for live scoring, traffic monitoring and drift alerts. |
+| **Reproducible** | `dvc repro` rebuilds both datasets' pipelines; MLflow records every run; CI lints, type-checks, tests, builds the dashboard and smoke-tests the Docker image. |
 
 > **About the Moroccan data.** Morocco has no public prepaid churn dataset. The Moroccan set is Expresso's joint distribution, shifted to a 2.7% churn prior and relabelled with Moroccan regions, operators, packs and MAD amounts. It exercises the pipeline on Moroccan-shaped data. It is **not** evidence about how Moroccan subscribers actually behave, and the results say so.
 
 ---
 
-## 🔍 What the data says
+## What the data says
 
 These figures come from the EDA and feature-engineering notebooks, run on the real Expresso training data.
 
@@ -75,11 +75,11 @@ Expresso was compared with two reference datasets, Cell2Cell (USA) and Orange Te
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph DATA["📦 Data · DVC-tracked"]
+    subgraph DATA["Data · DVC-tracked"]
         direction LR
         EXP[("Expresso · Senegal<br/>2.15M subscribers")]
         GEN["generate_moroccan_dataset.py<br/>CTGAN + ANRT calibration"]
@@ -87,7 +87,7 @@ flowchart TB
         EXP --> GEN --> MOR
     end
 
-    subgraph PIPE["⚙️ dvc repro · one chain per dataset"]
+    subgraph PIPE["dvc repro · one chain per dataset"]
         direction LR
         FEAT["featurize<br/>validate · split holdout<br/>FeaturePipeline"]
         TRAIN["train<br/>4-model CV · refit<br/>OOF calibration"]
@@ -95,7 +95,7 @@ flowchart TB
         FEAT --> TRAIN --> EVAL
     end
 
-    subgraph SERVE["🚀 Serving & monitoring"]
+    subgraph SERVE["Serving & monitoring"]
         direction LR
         API["FastAPI<br/>/predict · /logs · /drift"]
         LOG[("SQLite<br/>prediction log")]
@@ -138,7 +138,7 @@ Every transformer is sklearn-compatible and is fit on the training split only. T
 
 ---
 
-## 🎯 A leak-free evaluation protocol
+## A leak-free evaluation protocol
 
 A churn model is only as trustworthy as its holdout score. Every step below is built so that no number is measured on rows that helped produce it:
 
@@ -146,7 +146,7 @@ A churn model is only as trustworthy as its holdout score. Every step below is b
 flowchart TB
     RAW[("Labeled raw data")] --> SPLIT{{"Stratified split<br/>before anything is fit"}}
     SPLIT -->|"80#37; train"| TR["Training split"]
-    SPLIT -->|"20#37; holdout"| HO[("🔒 Holdout<br/>untouched until evaluation")]
+    SPLIT -->|"20#37; holdout"| HO[("Holdout<br/>untouched until evaluation")]
 
     TR --> FP["FeaturePipeline.fit_transform<br/>cross-fitted target encodings:<br/>no row sees its own label"]
     FP --> CV
@@ -199,7 +199,7 @@ Run `dvc repro`, then read `models/{dataset}/eval_metrics.json` and `training_ma
 
 ---
 
-## 🖥️ Operations dashboard
+## Operations dashboard
 
 A Vite + React + TypeScript dashboard sits on top of the API.
 
@@ -244,7 +244,7 @@ Binary flags and small counts are binned on their own values and judged by PSI a
 
 ---
 
-## 🔌 Serving API
+## Serving API
 
 ```mermaid
 sequenceDiagram
@@ -317,7 +317,7 @@ All settings are listed in [`.env.example`](.env.example).
 
 ---
 
-## 🚀 Quick start
+## Quick start
 
 ```bash
 # 1. Install
@@ -372,7 +372,7 @@ mlflow ui --backend-store-uri sqlite:///mlruns.db
 
 ---
 
-## 🧬 The Moroccan synthetic dataset
+## The Moroccan synthetic dataset
 
 | Parameter | Value | Source |
 |---|---|---|
@@ -389,7 +389,7 @@ mlflow ui --backend-store-uri sqlite:///mlruns.db
 
 ---
 
-## 🧪 Quality
+## Quality
 
 ```bash
 pytest                                  # 100+ tests
@@ -430,7 +430,7 @@ docs/                    PROJECT.md (full technical doc), ADRs, images
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 
 - [x] Leak-free evaluation, OOF calibration, frozen thresholds
 - [x] Calibrated serving, auth, rate limiting, prediction log
