@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project
 
-Production-grade MLOps pipeline for prepaid subscriber churn prediction using the Expresso Telecom dataset (Senegal). Target metric: ROC-AUC. Class imbalance ~18% churn.
+Production-grade MLOps pipeline for prepaid subscriber churn prediction. There are two datasets: Expresso Telecom (Senegal, real, ~18.75% churn) and a CTGAN-generated Moroccan synthetic set (2.7% churn). Target metric: ROC-AUC.
 
 ## Commands
 
@@ -19,62 +19,72 @@ pytest
 # Run a single test
 pytest tests/test_features.py::test_pipeline_fit_transform
 
-# Lint
+# Lint / type-check
 ruff check src/ tests/
-
-# Type-check
 mypy src/
 
+# Full pipeline for both datasets
+dvc repro
+
+# Local API (auth explicitly disabled for dev)
+CHURN_AUTH_DISABLED=1 uvicorn src.api.app:app --reload
+
 # MLflow UI
-mlflow ui --backend-store-uri mlruns
+mlflow ui --backend-store-uri sqlite:///mlruns.db
 ```
 
 ## Architecture
 
 ```
-configs/base.yaml          # Single source of truth for all hyperparameters and paths
+configs/base.yaml + configs/{dataset}.yaml   # shared defaults + per-dataset overlay (tuned params)
 src/
-  data/
-    ingestion.py           # load_train / load_test with explicit dtypes; reads from data/raw/expresso/
-    validation.py          # validate_raw() → ValidationReport; schema + domain rules
+  utils/config.py      # load_config(dataset), dataset_paths(dataset), setup_mlflow — use these,
+                       # never hardcode data/ or models/ paths
+  data/                # ingestion (dtypes, records_to_frame), validation
   features/
-    build_features.py      # FeaturePipeline + individual sklearn-compatible transformers
-  models/                  # (planned) training scripts and model wrappers
-  utils/
-    logging.py             # loguru setup; call setup_logger() at entry points
-tests/
-  test_features.py         # Unit tests for every transformer in build_features.py
-data/                      # Versioned via DVC, not git
-  raw/expresso/            # Train.csv, Test.csv, VariableDefinitions.csv
-  processed/ features/     # Generated artifacts
+    build_features.py  # FeaturePipeline (cross-fitted target encoding) + get_model_features()
+    run_pipeline.py    # validate → split holdout → fit on train → data/features/{dataset}/
+  models/
+    fitting.py         # early stopping on an inner split; refit with fixed rounds
+    train.py           # CV → refit → OOF calibration → frozen thresholds → models/{dataset}/model.pkl
+    calibrate.py       # CalibratedChurnModel, fit_calibration (OOF scores only)
+    evaluate_run.py    # holdout evaluation with frozen thresholds
+    tune.py            # Optuna; writes configs/{dataset}.yaml, never a model
+    artifacts.py       # load_artifacts(dataset) — shared by API and predict CLI
+  api/                 # FastAPI app, strict schemas, fail-closed auth, rate limit, SQLite log
+  monitoring/drift.py  # PSI + KS statistic vs. holdout baseline; prediction drift
+tests/                 # conftest.make_raw_frame() builds synthetic raw data with real signal
 ```
 
-### Feature pipeline (`src/features/build_features.py`)
+## Evaluation rules (do not regress)
 
-`FeaturePipeline` chains transformers in order — all fit on train only, applied to both splits:
+- The labeled holdout is split off in `run_pipeline.py` **before** anything is fit. Training, tuning, early stopping, calibration, and threshold selection must never read `holdout_features.parquet`.
+- Early stopping uses an inner split of the training fold (`src/models/fitting.py`), never the scored fold.
+- Target encoders are cross-fitted in `fit_transform`. Call `transform` only on data the pipeline was not fit on.
+- Calibrators are fit on out-of-fold predictions. Thresholds are chosen on cross-fitted calibrated OOF predictions and stored in the artifact.
+- Feature lists come from the training frame (`get_model_features`) and are reused for every other split.
 
-1. `MissingIndicatorAdder` — adds `{col}_missing` binary flags before imputation
-2. `ZeroImputer` — MNAR usage columns (DATA_VOLUME, call cols, FREQ_TOP_PACK) → 0
-3. `MedianImputer` — MAR columns (MONTANT, REVENUE, etc.) → train median
-4. `NumericFeatureEngineer` — derived features: `regularity_rate`, `recharge_per_freq`, `revenue_per_freq`, `total_calls`, `n_active_call_types`, `is_inactive`, `has_data`, `has_calls`
-5. `TenureEncoder` — ordinal 0–10 + `is_new_subscriber` flag
-6. `MRGEncoder` — YES/NO → binary `mrg_flag`
-7. `TargetEncoder(cols=["REGION"])` — James–Stein smoothed target encoding
-8. `TopPackEncoder` — rare-pack collapsing (min_freq=200) + frequency encode + target encode
+## Feature pipeline (`src/features/build_features.py`)
 
-`get_model_features(df)` returns the final feature list after dropping `user_id`, `CHURN`, and raw categorical columns (`REGION`, `TENURE`, `MRG`, `TOP_PACK`, `ARPU_SEGMENT`).
+1. `MissingIndicatorAdder` — `{col}_missing` flags before imputation
+2. `ServiceAbsenceEncoder` — `n_services_absent`, `is_ghost_subscriber`
+3. `ZeroImputer` — MNAR usage columns → 0
+4. `MedianImputer` — MAR columns → train median
+5. `NumericFeatureEngineer` — `regularity_rate`, `recharge_per_freq`, `total_calls`, …
+6. `TenureEncoder` — ordinal 0–10 + `is_new_subscriber`
+7. `MRGEncoder` — YES/NO → `mrg_flag`
+8. `TargetEncoder(cols=["REGION"])` — James–Stein smoothed, cross-fitted
+9. `TopPackEncoder` — rare-pack collapsing + frequency + cross-fitted target encoding
 
-### Config
+`get_model_features(df)` drops the structural columns (IDs, target, raw categoricals, `ARPU_SEGMENT`, `REGULARITY`). It then drops constant columns and exact duplicates, judged from the data itself.
 
-All paths, hyperparameters, and service settings live in `configs/base.yaml`. Load with PyYAML at pipeline entry points rather than hardcoding values.
+## MLflow
 
-### MLflow
+Experiment `moroccan_prepaid_churn`; tracking URI from `configs/base.yaml` (`sqlite:///mlruns.db`). Always go through `setup_mlflow(cfg)`.
 
-Experiment name: `moroccan_prepaid_churn`, tracking URI: `mlruns/` (local). Log params, metrics, and artifacts per run. `mlruns/` is gitignored.
+## Code style
 
-### Code style
-
-- Line length 100, ruff rules: `E, F, I, N, UP, ANN` (ANN101/ANN102 ignored)
+- Line length 100, ruff rules: `E, F, I, N, UP, ANN`
 - Strict mypy — all functions need full type annotations
 - Python 3.11+ syntax (`list[str]` not `List[str]`, `X | Y` unions)
 - Data: never commit raw data; track via DVC. Strip notebook outputs before committing.

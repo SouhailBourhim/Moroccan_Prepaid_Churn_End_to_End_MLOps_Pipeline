@@ -61,3 +61,9 @@ htmlcov/
 dashboard/node_modules/
 dashboard/.next/
 dashboard/build/
+
+# Runtime logs (loguru file sink)
+logs/
+
+# Batch predictions
+predictions/

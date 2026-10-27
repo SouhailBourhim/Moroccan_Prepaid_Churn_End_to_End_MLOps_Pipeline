@@ -31,17 +31,19 @@ dependencies = [
     "rich>=13",
     "loguru>=0.7",
     "python-dotenv>=1.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
-# Minimal runtime deps for the Docker API image — excludes training/notebook tools.
+# Minimal runtime deps for the Docker API image — excludes training/notebook tools
+# and every boosting library. Add the serve-* extra for the library of the model
+# being served (the winner recorded in models/{dataset}/training_manifest.json),
+# or serve-all when unsure.
 api = [
     "pandas>=2.2",
     "numpy>=1.26",
     "scikit-learn>=1.4",
-    "xgboost>=2.0",
-    "lightgbm>=4.3",
-    "catboost>=1.2",
+    "scipy>=1.13",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
     "pydantic>=2.7",
@@ -50,6 +52,10 @@ api = [
     "loguru>=0.7",
     "pyyaml>=6.0",
 ]
+serve-xgboost = ["xgboost>=2.0"]
+serve-lightgbm = ["lightgbm>=4.3"]
+serve-catboost = ["catboost>=1.2"]
+serve-all = ["xgboost>=2.0", "lightgbm>=4.3", "catboost>=1.2"]
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
@@ -77,6 +83,8 @@ ignore = ["N803", "N806"]
 # ANN401: model parameters span XGBoost/LightGBM/CatBoost/sklearn class hierarchies;
 # a shared Protocol would need to cover shap.Explainer's broad acceptance surface.
 "src/models/*.py" = ["ANN401"]
+# ANN401: DriftDetector accepts any fitted model exposing predict_proba.
+"src/monitoring/*.py" = ["ANN401"]
 # ANN401: test mock uses Any for the X parameter to satisfy the predict_proba duck type.
 "tests/test_api.py" = ["ANN401"]
 

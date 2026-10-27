@@ -1,28 +1,32 @@
+# Shared defaults for every dataset.
+# Per-dataset overrides (tuned hyperparameters) live in configs/{dataset}.yaml and
+# are deep-merged on top of this file by src.utils.config.load_config().
 data:
   raw_dir: data/raw/expresso
   moroccan_raw_file: data/raw/moroccan_telecom_churn.csv
-  processed_dir: data/processed
-  features_dir: data/features
 features:
   top_pack_min_freq: 200
   target_enc_smoothing: 20.0
+  target_enc_cv: 5
   regularity_inactive_threshold: 5
 training:
   random_state: 42
+  # Labeled holdout carved off before the feature pipeline is fit; never trained on.
   test_size: 0.2
   cv_folds: 5
   eval_metric: roc_auc
+  # Early stopping uses an inner split of each training fold, never the scored fold.
   early_stopping_rounds: 50
 xgboost:
-  n_estimators: 378
+  n_estimators: 1000
   max_depth: 7
-  learning_rate: 0.025777
-  subsample: 0.6622
-  colsample_bytree: 0.4554
-  min_child_weight: 260
-  reg_alpha: 0.102742
-  reg_lambda: 8.1289
-  gamma: 4.9473
+  learning_rate: 0.05
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_weight: 50
+  reg_alpha: 0.1
+  reg_lambda: 1.0
+  gamma: 0.0
 lightgbm:
   n_estimators: 1000
   max_depth: 7
@@ -34,13 +38,13 @@ lightgbm:
   reg_alpha: 0.1
   reg_lambda: 1.0
 catboost:
-  iterations: 552
-  depth: 4
-  learning_rate: 0.045577
-  l2_leaf_reg: 8.9199
-  subsample: 0.8736
-  colsample_bylevel: 0.7572
-  min_data_in_leaf: 180
+  iterations: 1000
+  depth: 7
+  learning_rate: 0.05
+  l2_leaf_reg: 3.0
+  subsample: 0.8
+  colsample_bylevel: 0.8
+  min_data_in_leaf: 50
 logistic_regression:
   C: 0.1
   max_iter: 1000
@@ -51,3 +55,5 @@ api:
   host: 0.0.0.0
   port: 8000
   workers: 4
+  # Which dataset's model the API serves; override with the CHURN_DATASET env var.
+  dataset: expresso

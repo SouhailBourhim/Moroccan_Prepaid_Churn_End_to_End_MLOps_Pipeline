@@ -1,5 +1,6 @@
 """Raw data loading with dtypes and basic validation."""
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -27,8 +28,25 @@ DTYPES: dict[str, str] = {
     "FREQ_TOP_PACK": "float32",
 }
 
+CAT_COLS: frozenset[str] = frozenset(c for c, t in DTYPES.items() if t == "category")
+FLOAT_COLS: frozenset[str] = frozenset(c for c, t in DTYPES.items() if t == "float32")
+
 # Moroccan dataset has the same schema + OPERATOR column
 _MOROCCAN_EXTRA: dict[str, str] = {"OPERATOR": "category"}
+
+
+def records_to_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
+    """Build a raw-schema DataFrame from JSON-like records (API requests, prediction log).
+
+    Applies the same dtypes as the CSV loaders so the fitted FeaturePipeline sees
+    identical input types at serving time and at training time.
+    """
+    df = pd.DataFrame(records)
+    for col in CAT_COLS & set(df.columns):
+        df[col] = df[col].astype("category")
+    for col in FLOAT_COLS & set(df.columns):
+        df[col] = df[col].astype("float32")
+    return df
 
 
 def load_train(path: Path | None = None, nrows: int | None = None) -> pd.DataFrame:

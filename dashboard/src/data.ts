@@ -66,7 +66,9 @@ export const pipelineStages = [
   "Impute MNAR and MAR fields",
   "Engineer usage features",
   "Encode tenure, MRG, REGION, TOP_PACK",
+  "Split off labeled holdout",
   "Train candidate models",
+  "Calibrate on out-of-fold scores",
   "Evaluate holdout metrics",
   "Serve FastAPI predictions",
 ];

@@ -210,24 +210,83 @@ def test_build_candidates_params_logged() -> None:
     assert xgb.params["scale_pos_weight"] == pytest.approx(3.0)
 
 
-def test_fit_final_model_disables_xgboost_early_stopping() -> None:
+def test_build_candidates_passes_xgboost_gamma() -> None:
+    from src.models.train import build_candidates
+
+    cfg: dict[str, object] = {
+        "training": {"random_state": 0},
+        "xgboost": {
+            "n_estimators": 10, "max_depth": 3, "learning_rate": 0.1,
+            "subsample": 0.8, "colsample_bytree": 0.8, "min_child_weight": 5,
+            "reg_alpha": 0.0, "reg_lambda": 1.0, "gamma": 4.5,
+        },
+        "lightgbm": {
+            "n_estimators": 10, "max_depth": 3, "learning_rate": 0.1,
+            "num_leaves": 15, "subsample": 0.8, "colsample_bytree": 0.8,
+            "min_child_samples": 5, "reg_alpha": 0.0, "reg_lambda": 1.0,
+        },
+    }
+    candidates = build_candidates(cfg, scale_pos_weight=3.0)  # type: ignore[arg-type]
+    xgb = next(c for c in candidates if c.name == "xgboost")
+    lgbm = next(c for c in candidates if c.name == "lightgbm")
+    assert xgb.model.get_params()["gamma"] == pytest.approx(4.5)
+    # LightGBM only bags (honours `subsample`) when subsample_freq > 0.
+    assert lgbm.model.get_params()["subsample_freq"] == 1
+
+
+def test_refit_with_iterations_disables_xgboost_early_stopping() -> None:
     from xgboost import XGBClassifier
 
-    from src.models.train import _fit_final_model
+    from src.models.fitting import refit_with_iterations
 
     rng = np.random.default_rng(42)
     X = rng.normal(size=(40, 4))
     y = np.array([0] * 20 + [1] * 20)
     model = XGBClassifier(
-        n_estimators=5,
+        n_estimators=50,
         early_stopping_rounds=2,
         eval_metric="auc",
         verbosity=0,
     )
 
-    _fit_final_model(model, X, y)
+    fitted = refit_with_iterations(model, X, y, n_iter=7)
 
-    assert model.get_params()["early_stopping_rounds"] is None
+    assert fitted.get_params()["early_stopping_rounds"] is None
+    assert fitted.get_params()["n_estimators"] == 7
+
+
+def test_refit_with_iterations_catboost_drops_early_stopping() -> None:
+    from catboost import CatBoostClassifier
+
+    from src.models.fitting import refit_with_iterations
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(60, 3))
+    y = (X[:, 0] > 0).astype(int)
+    model = CatBoostClassifier(
+        iterations=100, early_stopping_rounds=5, verbose=0, allow_writing_files=False
+    )
+    fitted = refit_with_iterations(model, X, y, n_iter=12)
+    assert fitted.tree_count_ == 12
+    assert "early_stopping_rounds" not in fitted.get_params()
+
+
+def test_fit_with_early_stopping_uses_inner_split() -> None:
+    from sklearn.linear_model import LogisticRegression
+    from xgboost import XGBClassifier
+
+    from src.models.fitting import fit_with_early_stopping
+
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(400, 5))
+    y = (X[:, 0] + rng.normal(scale=0.5, size=400) > 0).astype(int)
+
+    xgb = XGBClassifier(n_estimators=500, learning_rate=0.3, eval_metric="auc", verbosity=0)
+    n_iter = fit_with_early_stopping(xgb, X, y, rounds=10, random_state=0)
+    assert n_iter is not None and 1 <= n_iter <= 500
+
+    # Models without early stopping are fit on all rows and report no round count.
+    assert fit_with_early_stopping(LogisticRegression(), X, y, rounds=10, random_state=0) is None
 
 
 # ── tune: _suggest_params + _patch_config ────────────────────────────────────

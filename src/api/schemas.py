@@ -1,39 +1,42 @@
 """Pydantic request/response schemas for the churn prediction API."""
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+# Usage, revenue, and frequency columns are counts or amounts — never negative.
+NonNegFloat = Annotated[float, Field(ge=0)]
+
+TenureBand = Literal[
+    "A < 2 month",
+    "B 2 month",
+    "C 3 month",
+    "D 3-6 month",
+    "E 6-9 month",
+    "F 9-12 month",
+    "G 12-15 month",
+    "H 15-18 month",
+    "I 18-21 month",
+    "J 21-24 month",
+    "K > 24 month",
+]
 
 
 class SubscriberFeatures(BaseModel):
     """Raw subscriber features matching the Expresso dataset schema.
 
-    All usage columns are optional — pass None when a subscriber has no
+    All usage columns are optional — pass null when a subscriber has no
     recorded activity for that channel (treated as MNAR by the pipeline).
-    REGULARITY is the only field with 0% missingness in training data;
-    it is strongly recommended but also accepts None for robustness.
+    Unknown field names are rejected (422) rather than silently ignored, so a
+    misspelled column cannot turn into a missing value.
     """
 
-    REGION: str | None = None
-    TENURE: str | None = None
-    MRG: str | None = None
-    TOP_PACK: str | None = None
-    MONTANT: float | None = None
-    FREQUENCE_RECH: float | None = None
-    REVENUE: float | None = None
-    ARPU_SEGMENT: float | None = None
-    FREQUENCE: float | None = None
-    DATA_VOLUME: float | None = None
-    ON_NET: float | None = None
-    ORANGE: float | None = None
-    TIGO: float | None = None
-    ZONE1: float | None = None
-    ZONE2: float | None = None
-    REGULARITY: float | None = Field(default=None, ge=0, le=90)
-    FREQ_TOP_PACK: float | None = None
-
-    model_config = {
-        "json_schema_extra": {
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
             "example": {
+                "subscriber_id": "sub-000123",
                 "REGION": "DAKAR",
                 "TENURE": "K > 24 month",
                 "MRG": "NO",
@@ -52,28 +55,66 @@ class SubscriberFeatures(BaseModel):
                 "REGULARITY": 54.0,
                 "FREQ_TOP_PACK": 8.0,
             }
-        }
-    }
+        },
+    )
+
+    subscriber_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Caller's subscriber identifier. Not a model input; stored with the "
+            "prediction so churn labels can later be joined back to it."
+        ),
+    )
+    REGION: str | None = Field(default=None, max_length=64)
+    TENURE: TenureBand | None = None
+    MRG: Literal["YES", "NO"] | None = None
+    TOP_PACK: str | None = Field(default=None, max_length=128)
+    MONTANT: NonNegFloat | None = None
+    FREQUENCE_RECH: NonNegFloat | None = None
+    REVENUE: NonNegFloat | None = None
+    ARPU_SEGMENT: NonNegFloat | None = None
+    FREQUENCE: NonNegFloat | None = None
+    DATA_VOLUME: NonNegFloat | None = None
+    ON_NET: NonNegFloat | None = None
+    ORANGE: NonNegFloat | None = None
+    TIGO: NonNegFloat | None = None
+    ZONE1: NonNegFloat | None = None
+    ZONE2: NonNegFloat | None = None
+    REGULARITY: float | None = Field(default=None, ge=0, le=90)
+    FREQ_TOP_PACK: NonNegFloat | None = None
+
+    def model_inputs(self) -> dict[str, object]:
+        """The raw feature columns only (no identifiers)."""
+        return self.model_dump(exclude={"subscriber_id"})
 
 
 class PredictionRequest(BaseModel):
     """Batch prediction request — up to 10 000 subscribers per call."""
 
+    model_config = ConfigDict(extra="forbid")
+
     subscribers: list[SubscriberFeatures] = Field(..., min_length=1, max_length=10_000)
-    threshold: float = Field(
-        default=0.5,
+    threshold: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
-        description="Probability threshold for the binary churn_prediction label.",
+        description=(
+            "Probability threshold for the binary churn_prediction label. Defaults "
+            "to the model's F1-optimal threshold, chosen on out-of-fold training "
+            "predictions."
+        ),
     )
 
 
 class SubscriberPrediction(BaseModel):
+    subscriber_id: str | None = None
     churn_probability: float = Field(..., ge=0.0, le=1.0)
     churn_prediction: bool
 
 
 class PredictionResponse(BaseModel):
+    request_id: str
     predictions: list[SubscriberPrediction]
     model_name: str
     threshold: float
@@ -91,6 +132,9 @@ class ReadyResponse(BaseModel):
 
 class InfoResponse(BaseModel):
     model_name: str
+    dataset: str
+    calibration_method: str | None
+    default_threshold: float
     cv_roc_auc_mean: float
     cv_roc_auc_std: float
     cv_pr_auc_mean: float
@@ -98,8 +142,13 @@ class InfoResponse(BaseModel):
 
 
 class LogsSummary(BaseModel):
+    # All-time counters
     total_predictions: int
     total_requests: int
+    # Everything below is restricted to the last `window_hours`
+    window_hours: int
+    predictions_in_window: int
+    requests_in_window: int
     mean_churn_probability: float | None
     churn_flag_rate: float | None
     mean_latency_ms: float | None
@@ -112,6 +161,7 @@ class RecentPrediction(BaseModel):
     threshold: float
     latency_ms: float | None
     subscriber_idx: int
+    subscriber_id: str | None
     churn_probability: float
     churn_prediction: bool
 
@@ -123,9 +173,10 @@ class LogsResponse(BaseModel):
 
 class FeatureDriftResult(BaseModel):
     feature: str
+    kind: str     # "continuous" | "discrete"
     psi: float
-    ks_statistic: float
-    ks_pvalue: float
+    ks_statistic: float | None   # continuous features only
+    ks_pvalue: float | None      # reported for reference; not used for status
     status: str   # "OK" | "WARN" | "DRIFT"
     n_live: int
 
@@ -139,3 +190,5 @@ class DriftResponse(BaseModel):
     n_warned: int
     overall_status: str   # "OK" | "WARN" | "DRIFT" | "INSUFFICIENT_DATA"
     features: list[FeatureDriftResult]
+    # Drift of the served churn_probability itself vs. its holdout distribution.
+    prediction_drift: FeatureDriftResult | None = None

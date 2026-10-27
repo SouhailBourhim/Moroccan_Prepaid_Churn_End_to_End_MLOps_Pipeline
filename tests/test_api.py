@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from src.api.app import (
@@ -25,7 +25,7 @@ from src.api.app import (
 )
 from src.api.dependencies import ModelArtifacts
 from src.api.logger import PredictionLogger
-from src.api.rate_limit import SlidingWindowLimiter
+from src.api.rate_limit import SlidingWindowLimiter, per_worker_limit
 from src.monitoring.drift import DriftDetector, DriftReport, FeatureDriftResult
 
 # ── Mock artifacts ────────────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ _OK_REPORT = DriftReport(
     overall_status="OK",
     features=[
         FeatureDriftResult(
-            feature="regularity_rate", psi=0.02, ks_statistic=0.04,
+            feature="regularity_rate", kind="continuous", psi=0.02, ks_statistic=0.04,
             ks_pvalue=0.45, status="OK", n_live=200,
         ),
     ],
@@ -339,6 +339,7 @@ def test_logs_records_predict_calls(client: TestClient) -> None:
 @pytest.fixture
 def auth_client(tmp_logger: PredictionLogger, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """TestClient with auth enabled via CHURN_API_KEYS env var."""
+    monkeypatch.delenv("CHURN_AUTH_DISABLED", raising=False)
     monkeypatch.setenv("CHURN_API_KEYS", "valid-key-1,valid-key-2")
     mock_detector = _MockDriftDetector(_OK_REPORT)
     app.dependency_overrides[get_artifacts] = lambda: MOCK_ARTIFACTS
@@ -428,3 +429,222 @@ def test_rate_limit_health_unaffected(rate_limited_client: TestClient) -> None:
     rate_limited_client.post("/predict", json=payload)  # exhaust predict limit
     r = rate_limited_client.get("/health")
     assert r.status_code == 200
+
+
+# ── Request validation ────────────────────────────────────────────────────────
+
+
+def test_predict_unknown_field_rejected(client: TestClient) -> None:
+    """A misspelled column must fail loudly, not silently become a missing value."""
+    bad = {**VALID_SUBSCRIBER, "regularity": 54.0}
+    r = client.post("/predict", json={"subscribers": [bad]})
+    assert r.status_code == 422
+
+
+def test_predict_negative_usage_rejected(client: TestClient) -> None:
+    bad = {**VALID_SUBSCRIBER, "ON_NET": -5.0}
+    r = client.post("/predict", json={"subscribers": [bad]})
+    assert r.status_code == 422
+
+
+def test_predict_unknown_tenure_rejected(client: TestClient) -> None:
+    bad = {**VALID_SUBSCRIBER, "TENURE": "forever"}
+    r = client.post("/predict", json={"subscribers": [bad]})
+    assert r.status_code == 422
+
+
+def test_predict_uses_model_default_threshold(tmp_logger: PredictionLogger) -> None:
+    artifacts = MOCK_ARTIFACTS._replace(default_threshold=0.25)
+    app.dependency_overrides[get_artifacts] = lambda: artifacts
+    app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
+    app.dependency_overrides[check_predict_rate] = lambda: None
+    try:
+        r = TestClient(app).post("/predict", json={"subscribers": [VALID_SUBSCRIBER]})
+    finally:
+        app.dependency_overrides.clear()
+    assert r.status_code == 200
+    assert r.json()["threshold"] == pytest.approx(0.25)
+    assert r.json()["predictions"][0]["churn_prediction"] is True  # 0.3 >= 0.25
+
+
+def test_predict_echoes_and_logs_subscriber_id(client: TestClient) -> None:
+    sub = {**VALID_SUBSCRIBER, "subscriber_id": "sub-42"}
+    r = client.post("/predict", json={"subscribers": [sub, VALID_SUBSCRIBER]})
+    assert r.status_code == 200
+    preds = r.json()["predictions"]
+    assert [p["subscriber_id"] for p in preds] == ["sub-42", None]
+
+    recent = client.get("/logs").json()["recent"]
+    assert {row["subscriber_id"] for row in recent} == {"sub-42", None}
+
+
+def test_predict_does_not_pass_subscriber_id_to_pipeline(tmp_logger: PredictionLogger) -> None:
+    seen: list[list[str]] = []
+
+    class _RecordingPipeline(_MockPipeline):
+        def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+            seen.append(list(df.columns))
+            return super().transform(df)
+
+    artifacts = MOCK_ARTIFACTS._replace(pipeline=_RecordingPipeline(FEATURE_COLS))
+    app.dependency_overrides[get_artifacts] = lambda: artifacts
+    app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
+    app.dependency_overrides[check_predict_rate] = lambda: None
+    try:
+        sub = {**VALID_SUBSCRIBER, "subscriber_id": "sub-1"}
+        TestClient(app).post("/predict", json={"subscribers": [sub]})
+    finally:
+        app.dependency_overrides.clear()
+    assert seen and "subscriber_id" not in seen[0]
+
+
+# ── /logs window ──────────────────────────────────────────────────────────────
+
+
+def test_logs_window_excludes_old_requests(
+    client: TestClient, tmp_logger: PredictionLogger
+) -> None:
+    import sqlite3
+    from contextlib import closing
+    from datetime import UTC, datetime, timedelta
+
+    client.post("/predict", json={"subscribers": [VALID_SUBSCRIBER] * 2})
+    client.post("/predict", json={"subscribers": [VALID_SUBSCRIBER] * 3})
+    # Age the first request to 48 h ago.
+    old_ts = (datetime.now(UTC) - timedelta(hours=48)).isoformat()
+    with closing(sqlite3.connect(tmp_logger.db_path)) as conn, conn:
+        first = conn.execute(
+            "SELECT request_id FROM prediction_requests ORDER BY ts LIMIT 1"
+        ).fetchone()[0]
+        conn.execute("UPDATE prediction_requests SET ts = ? WHERE request_id = ?", (old_ts, first))
+
+    day = client.get("/logs?hours=24").json()["summary"]
+    assert day["total_predictions"] == 5
+    assert day["total_requests"] == 2
+    assert day["window_hours"] == 24
+    assert day["predictions_in_window"] == 3
+    assert day["requests_in_window"] == 1
+
+    week = client.get("/logs?hours=168").json()["summary"]
+    assert week["predictions_in_window"] == 5
+
+
+def test_logger_prune_removes_old_requests(tmp_logger: PredictionLogger) -> None:
+    import sqlite3
+    from contextlib import closing
+    from datetime import UTC, datetime, timedelta
+
+    for rid in ("old", "new"):
+        tmp_logger.log_request(
+            request_id=rid, model_name="m", n_subscribers=1, threshold=0.5,
+            latency_ms=1.0, probs=[0.1], predictions=[False], raw_inputs=[{}],
+        )
+    with closing(sqlite3.connect(tmp_logger.db_path)) as conn, conn:
+        conn.execute(
+            "UPDATE prediction_requests SET ts = ? WHERE request_id = 'old'",
+            ((datetime.now(UTC) - timedelta(days=40)).isoformat(),),
+        )
+    assert tmp_logger.prune(retention_days=30) == 1
+    assert tmp_logger.summary()["total_requests"] == 1
+
+
+# ── Auth fails closed ─────────────────────────────────────────────────────────
+
+
+def test_auth_unconfigured_returns_503(
+    tmp_logger: PredictionLogger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CHURN_AUTH_DISABLED", raising=False)
+    monkeypatch.delenv("CHURN_API_KEYS", raising=False)
+    app.dependency_overrides[get_artifacts] = lambda: MOCK_ARTIFACTS
+    app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
+    app.dependency_overrides[check_general_rate] = lambda: None
+    try:
+        c = TestClient(app, raise_server_exceptions=False)
+        assert c.get("/info").status_code == 503
+        assert "not configured" in c.get("/logs").json()["detail"]
+        assert c.get("/health").status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ── Rate limiter client identity and memory ───────────────────────────────────
+
+
+def _request(peer: str, xff: str | None = None) -> Request:
+    headers = [(b"x-forwarded-for", xff.encode())] if xff else []
+    return Request({"type": "http", "client": (peer, 1234), "headers": headers})
+
+
+def test_rate_limit_ignores_spoofed_forwarded_for() -> None:
+    limiter = SlidingWindowLimiter(max_requests=1)
+    limiter.check(_request("10.0.0.5", xff="1.1.1.1"))
+    # Rotating X-Forwarded-For from an untrusted peer must not reset the budget.
+    with pytest.raises(HTTPException) as exc:
+        limiter.check(_request("10.0.0.5", xff="2.2.2.2"))
+    assert exc.value.status_code == 429
+
+
+def test_rate_limit_trusted_proxy_uses_forwarded_client() -> None:
+    limiter = SlidingWindowLimiter(max_requests=1, trusted_proxies=frozenset({"10.0.0.1"}))
+    # The right-most untrusted hop is the client; the left-most is client-controlled.
+    assert limiter.client_key(_request("10.0.0.1", xff="9.9.9.9, 203.0.113.7")) == "203.0.113.7"
+    limiter.check(_request("10.0.0.1", xff="203.0.113.7"))
+    limiter.check(_request("10.0.0.1", xff="203.0.113.8"))  # different client behind proxy
+    with pytest.raises(HTTPException):
+        limiter.check(_request("10.0.0.1", xff="203.0.113.7"))
+
+
+def test_rate_limit_bounds_client_table() -> None:
+    limiter = SlidingWindowLimiter(max_requests=5, max_clients=3)
+    for i in range(10):
+        limiter.check(_request(f"192.0.2.{i}"))
+    assert len(limiter._buckets) <= 3
+
+
+def test_per_worker_limit_splits_budget() -> None:
+    assert per_worker_limit(200, 4) == 50
+    assert per_worker_limit(30, 4) == 8
+    assert per_worker_limit(1, 4) == 1
+    assert per_worker_limit(30, 0) == 30
+
+
+# ── End to end with a real pipeline and calibrated model ──────────────────────
+
+
+def test_predict_end_to_end_with_real_pipeline(tmp_logger: PredictionLogger) -> None:
+    from sklearn.linear_model import LogisticRegression
+
+    from src.features.build_features import FeaturePipeline, get_model_features
+    from src.models.calibrate import CalibratedChurnModel, fit_calibrator
+    from tests.conftest import make_raw_frame
+
+    raw = make_raw_frame(400)
+    X_raw, y = raw.drop(columns=["CHURN"]), raw["CHURN"].to_numpy()
+    pipeline = FeaturePipeline(top_pack_min_freq=10)
+    train_fe = pipeline.fit_transform(X_raw, raw["CHURN"])
+    cols = get_model_features(train_fe)
+    X = train_fe[cols].to_numpy(dtype=np.float32)
+    base = LogisticRegression(max_iter=2000).fit(X, y)
+    model = CalibratedChurnModel(
+        base, fit_calibrator("sigmoid", base.predict_proba(X)[:, 1], y), "sigmoid"
+    )
+    artifacts = ModelArtifacts(
+        pipeline=pipeline, model=model, feature_cols=cols,
+        manifest={"best_model": "logistic_regression"}, default_threshold=0.4,
+    )
+    app.dependency_overrides[get_artifacts] = lambda: artifacts
+    app.dependency_overrides[get_pred_logger] = lambda: tmp_logger
+    app.dependency_overrides[check_predict_rate] = lambda: None
+    try:
+        c = TestClient(app)
+        # Single sparse row, an all-null row, and an unseen region must all score.
+        r = c.post("/predict", json={"subscribers": [
+            VALID_SUBSCRIBER, {}, {**VALID_SUBSCRIBER, "REGION": "NOT-A-REGION"},
+        ]})
+    finally:
+        app.dependency_overrides.clear()
+    assert r.status_code == 200
+    probs = [p["churn_probability"] for p in r.json()["predictions"]]
+    assert all(0.0 <= p <= 1.0 for p in probs)
+    assert r.json()["threshold"] == pytest.approx(0.4)

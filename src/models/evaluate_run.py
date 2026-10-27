@@ -1,177 +1,127 @@
-"""Standalone holdout evaluation script for the DVC pipeline.
+"""Holdout evaluation of the trained model (DVC `evaluate_*` stages).
 
-Expresso mode (default): loads train_features.parquet and carves a deterministic
-20% stratified holdout. Writes models/eval_metrics.json.
+Scores data/features/{dataset}/holdout_features.parquet — the labeled split that
+run_pipeline.py carves off *before* the feature pipeline is fit, and that
+training, calibration, and threshold selection never see.
 
-Moroccan mode (--dataset moroccan): loads test_features.parquet directly — it is
-already the 20% stratified holdout produced by run_pipeline.py --dataset moroccan
-and contains CHURN labels. Writes models/eval_metrics_moroccan.json.
+Nothing is tuned here: decision thresholds are the ones train.py chose on
+out-of-fold predictions and stored in the model artifact. The holdout only
+measures them.
+
+Writes models/{dataset}/eval_metrics.json.
 
 Usage:
-    python -m src.models.evaluate_run
-    python -m src.models.evaluate_run --dataset moroccan
-    python -m src.models.evaluate_run --no-mlflow
+    python -m src.models.evaluate_run --dataset expresso
+    python -m src.models.evaluate_run --dataset moroccan --no-mlflow
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 import joblib
-import mlflow
 import numpy as np
 import pandas as pd
-import yaml
 from loguru import logger
-from sklearn.model_selection import train_test_split
 
-from src.models.evaluate import compute_metrics, optimal_threshold
+from src.models.evaluate import compute_metrics
+from src.utils.config import BASE_CONFIG, DATASETS, dataset_paths, load_config, setup_mlflow
 from src.utils.logging import setup_logger
 
-ROOT = Path(__file__).parents[2]
-FEATURES_DIR = ROOT / "data" / "features"
-MODELS_DIR = ROOT / "models"
-CONFIG_PATH = ROOT / "configs" / "base.yaml"
 
-HOLDOUT_SIZE = 0.20
-RANDOM_STATE = 42
-
-
-def _load_config(path: Path) -> dict[str, Any]:
-    with open(path) as fh:
-        return yaml.safe_load(fh)  # type: ignore[no-any-return]
-
-
-def _load_holdout(dataset: str) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Return (X, y, feature_cols) for the evaluation holdout."""
-    if dataset == "moroccan":
-        # test_features.parquet is already the 20% split with CHURN labels
-        df = pd.read_parquet(FEATURES_DIR / "test_features.parquet")
-        if "CHURN" not in df.columns:
-            raise RuntimeError(
-                "test_features.parquet has no CHURN column. "
-                "Re-run: python -m src.features.run_pipeline --dataset moroccan"
-            )
-        y = df["CHURN"].to_numpy()
-        feature_cols = [c for c in df.columns if c not in ("CHURN", "user_id")]
-        X = df[feature_cols].to_numpy(dtype=np.float32)
-        return X, y, feature_cols
-
-    # Expresso: carve holdout from train_features.parquet
-    df = pd.read_parquet(FEATURES_DIR / "train_features.parquet")
-    y = df["CHURN"].to_numpy()
-    feature_cols = [c for c in df.columns if c != "CHURN"]
-    X = df[feature_cols].to_numpy(dtype=np.float32)
-    _, X_val, _, y_val = train_test_split(
-        X, y, test_size=HOLDOUT_SIZE, stratify=y, random_state=RANDOM_STATE
-    )
-    return X_val, y_val, feature_cols
-
-
-def run(dataset: str = "expresso", use_mlflow: bool = True) -> dict[str, float]:
-    setup_logger()
-    cfg = _load_config(CONFIG_PATH)
-
-    # ── Load holdout ──────────────────────────────────────────────────────────
-    X_val, y_val, feature_cols = _load_holdout(dataset)
-    logger.info(
-        f"[{dataset}] Holdout: {len(y_val):,} rows  churn={y_val.mean():.3%}"
-    )
-
-    # ── Load model ────────────────────────────────────────────────────────────
-    artifact: dict[str, Any] = joblib.load(MODELS_DIR / "best_model.pkl")
-    model: Any = artifact["model"]
-    saved_cols: list[str] = artifact["feature_cols"]
-
-    missing_cols = [c for c in saved_cols if c not in feature_cols]
-    if missing_cols:
-        raise RuntimeError(
-            f"Saved model feature columns are missing from features parquet: "
-            f"{missing_cols}. Regenerate features and retrain the model."
+def _load_holdout(path: Path, feature_cols: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found — run `python -m src.features.run_pipeline` first."
         )
-    col_idx = [feature_cols.index(c) for c in saved_cols]
-    X_val = X_val[:, col_idx]
+    df = pd.read_parquet(path)
+    if "CHURN" not in df.columns:
+        raise RuntimeError(f"{path} has no CHURN column; regenerate features.")
+    missing = [c for c in feature_cols if c not in df.columns]
+    if missing:
+        raise RuntimeError(
+            f"Model feature columns missing from {path.name}: {missing}. "
+            "Regenerate features and retrain the model."
+        )
+    return df[feature_cols].to_numpy(dtype=np.float32), df["CHURN"].to_numpy()
 
-    # ── Score ─────────────────────────────────────────────────────────────────
-    y_prob: np.ndarray = model.predict_proba(X_val)[:, 1]
 
-    t_youden = optimal_threshold(y_val, y_prob, strategy="youden")
-    t_f1 = optimal_threshold(y_val, y_prob, strategy="f1")
+def run(
+    dataset: str = "expresso",
+    use_mlflow: bool = True,
+    config_path: Path = BASE_CONFIG,
+) -> dict[str, Any]:
+    setup_logger()
+    cfg = load_config(dataset, config_path)
+    paths = dataset_paths(dataset)
 
-    m_default = compute_metrics(y_val, y_prob, threshold=0.5)
-    m_youden = compute_metrics(y_val, y_prob, threshold=t_youden)
-    m_f1 = compute_metrics(y_val, y_prob, threshold=t_f1)
+    artifact: dict[str, Any] = joblib.load(paths.model)
+    model: Any = artifact["model"]
+    feature_cols: list[str] = artifact["feature_cols"]
+    thresholds: dict[str, float] = artifact.get("thresholds", {})
 
-    # ── Flat metrics dict (DVC-friendly) ──────────────────────────────────────
-    churn_rate = float(y_val.mean())
-    baseline_brier = churn_rate * (1 - churn_rate) ** 2 + (1 - churn_rate) * churn_rate ** 2
-    metrics: dict[str, float] = {
-        "dataset": dataset,  # type: ignore[dict-item]
-        "holdout_size": float(len(y_val)),
+    X, y = _load_holdout(paths.holdout_features, feature_cols)
+    logger.info(f"[{dataset}] Holdout: {len(y):,} rows  churn={y.mean():.3%}")
+
+    y_prob: np.ndarray = model.predict_proba(X)[:, 1]
+    base = compute_metrics(y, y_prob)
+
+    churn_rate = float(y.mean())
+    metrics: dict[str, Any] = {
+        "dataset": dataset,
+        "model_name": artifact.get("model_name", "unknown"),
+        "calibration_method": artifact.get("calibration_method"),
+        "holdout_size": int(len(y)),
         "churn_rate": churn_rate,
         # Ranking metrics (threshold-independent)
-        "roc_auc": m_default["roc_auc"],
-        "pr_auc": m_default["pr_auc"],
-        "brier": m_default["brier"],
-        "baseline_brier": baseline_brier,
-        # Threshold-based at default 0.5
-        "f1_default": m_default["f1"],
-        "precision_default": m_default["precision"],
-        "recall_default": m_default["recall"],
-        # Threshold-based at Youden-J optimum
-        "threshold_youden": t_youden,
-        "f1_youden": m_youden["f1"],
-        "precision_youden": m_youden["precision"],
-        "recall_youden": m_youden["recall"],
-        # Threshold-based at F1 optimum
-        "threshold_f1": t_f1,
-        "f1_f1opt": m_f1["f1"],
-        "precision_f1opt": m_f1["precision"],
-        "recall_f1opt": m_f1["recall"],
+        "roc_auc": base["roc_auc"],
+        "pr_auc": base["pr_auc"],
+        # Probability quality
+        "brier": base["brier"],
+        "baseline_brier": churn_rate * (1 - churn_rate),
     }
+    if hasattr(model, "predict_raw"):
+        metrics["uncalibrated_brier"] = compute_metrics(y, model.predict_raw(X))["brier"]
 
-    suffix = f"_{dataset}" if dataset != "expresso" else ""
-    out = MODELS_DIR / f"eval_metrics{suffix}.json"
-    with open(out, "w") as fh:
+    # Threshold metrics at the thresholds frozen during training
+    for name, t in thresholds.items():
+        m = compute_metrics(y, y_prob, threshold=t)
+        metrics[f"threshold_{name}"] = t
+        metrics[f"f1_{name}"] = m["f1"]
+        metrics[f"precision_{name}"] = m["precision"]
+        metrics[f"recall_{name}"] = m["recall"]
+
+    paths.models_dir.mkdir(parents=True, exist_ok=True)
+    with open(paths.eval_metrics, "w") as fh:
         json.dump(metrics, fh, indent=2)
 
     logger.info(
-        f"Holdout ROC-AUC={metrics['roc_auc']:.4f}  "
-        f"PR-AUC={metrics['pr_auc']:.4f}  "
-        f"Brier={metrics['brier']:.4f}"
+        f"Holdout ROC-AUC={metrics['roc_auc']:.4f}  PR-AUC={metrics['pr_auc']:.4f}  "
+        f"Brier={metrics['brier']:.4f} (baseline {metrics['baseline_brier']:.4f})"
     )
-    logger.info(
-        f"Youden threshold={t_youden:.3f}  "
-        f"F1={metrics['f1_youden']:.3f}  "
-        f"P={metrics['precision_youden']:.3f}  "
-        f"R={metrics['recall_youden']:.3f}"
-    )
-    logger.info(f"Metrics saved → {out}")
-
-    # ── MLflow ────────────────────────────────────────────────────────────────
-    if use_mlflow:
-        mlflow_cfg = cfg.get("mlflow", {})
-        tracking_uri = str(mlflow_cfg.get("tracking_uri", "mlruns"))
-        resolved_uri = (
-            tracking_uri
-            if "://" in tracking_uri or os.path.isabs(tracking_uri)
-            else str(ROOT / tracking_uri)
+    for name in thresholds:
+        logger.info(
+            f"  @{name} t={metrics[f'threshold_{name}']:.3f}  "
+            f"F1={metrics[f'f1_{name}']:.3f}  P={metrics[f'precision_{name}']:.3f}  "
+            f"R={metrics[f'recall_{name}']:.3f}"
         )
-        mlflow.set_tracking_uri(resolved_uri)
-        mlflow.set_experiment(mlflow_cfg.get("experiment_name", "moroccan_prepaid_churn"))
+    logger.info(f"Metrics saved → {paths.eval_metrics}")
 
+    if use_mlflow:
+        import mlflow
+
+        setup_mlflow(cfg)
         with mlflow.start_run(run_name=f"evaluate__{dataset}"):
             mlflow.log_param("dataset", dataset)
-            mlflow.log_param("holdout_size", len(y_val))
-            mlflow.log_param("n_features", len(saved_cols))
-            mlflow.log_param("model_name", artifact.get("model", "unknown").__class__.__name__)
+            mlflow.log_param("holdout_size", len(y))
+            mlflow.log_param("n_features", len(feature_cols))
+            mlflow.log_param("model_name", metrics["model_name"])
             for key, val in metrics.items():
-                if key not in ("holdout_size", "churn_rate", "dataset"):
+                if isinstance(val, float):
                     mlflow.log_metric(key, val)
-            mlflow.log_artifact(str(out), "evaluation")
+            mlflow.log_artifact(str(paths.eval_metrics), "evaluation")
 
             active = mlflow.active_run()
             if active is not None:
@@ -181,17 +131,13 @@ def run(dataset: str = "expresso", use_mlflow: bool = True) -> dict[str, float]:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument(
-        "--dataset",
-        choices=["expresso", "moroccan"],
-        default="expresso",
-        help="Which dataset's holdout to evaluate against",
-    )
+    p = argparse.ArgumentParser(description="Evaluate the trained model on the labeled holdout")
+    p.add_argument("--dataset", choices=DATASETS, default="expresso")
+    p.add_argument("--config", type=Path, default=BASE_CONFIG)
     p.add_argument("--no-mlflow", dest="use_mlflow", action="store_false")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    run(dataset=args.dataset, use_mlflow=args.use_mlflow)
+    run(dataset=args.dataset, use_mlflow=args.use_mlflow, config_path=args.config)

@@ -1,34 +1,39 @@
-"""Feature drift detection for the churn prediction API.
+"""Feature and prediction drift detection for the churn prediction API.
 
-Compares live subscriber feature distributions (from the prediction log) against
-the training baseline using two complementary metrics:
+Compares live traffic (from the prediction log) against the labeled holdout —
+data that went through exactly the serving transform, unlike the training
+split whose target encodings are cross-fitted.
 
-  PSI  (Population Stability Index) — measures distributional shift on a binned
-       scale; industry standard for model monitoring.
-       < 0.1  → OK   |  0.1–0.2 → WARN  |  > 0.2 → DRIFT
+Status is driven by effect sizes, not p-values. With thousands of live rows a
+KS p-value flags shifts far too small to matter, and testing ~40 features at
+p < 0.05 would raise a false WARN on almost every report.
 
-  KS   (Kolmogorov–Smirnov 2-sample test) — non-parametric; detects shape shifts
-       that PSI can miss when distributions have similar means but different tails.
-       p > 0.05 → OK  |  0.01–0.05 → WARN  |  p < 0.01 → DRIFT
+  PSI  (Population Stability Index), every feature
+       < 0.1 → OK  |  0.1–0.2 → WARN  |  > 0.2 → DRIFT
+  KS statistic D (max CDF gap), continuous features only
+       < 0.1 → OK  |  0.1–0.2 → WARN  |  > 0.2 → DRIFT
 
-Per-feature status is set to the stricter of the two metrics.
-Overall report status is DRIFT if any feature drifts, WARN if any warn, else OK.
+Discrete features (binary flags, counts, ordinals — at most DISCRETE_MAX_VALUES
+distinct values in the baseline) are binned on their own values and judged by
+PSI alone; a KS test is not meaningful for them. The KS p-value is still
+reported for continuous features, for reference only.
+
+Prediction drift — the served churn_probability vs. the model's scores on the
+holdout — is reported separately and counts toward the overall status.
+Overall status is DRIFT if anything drifts, WARN if anything warns, else OK.
 """
 from __future__ import annotations
 
-import json
-import sqlite3
-from collections.abc import Generator
-from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp
 
+from src.data.ingestion import records_to_frame
 from src.features.build_features import FeaturePipeline
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -36,17 +41,13 @@ from src.features.build_features import FeaturePipeline
 PSI_BINS = 10
 PSI_WARN = 0.10
 PSI_DRIFT = 0.20
-KS_WARN = 0.05
-KS_DRIFT = 0.01
-BASELINE_SAMPLE = 10_000   # rows sampled from train_features.parquet for KS test
+KS_STAT_WARN = 0.10
+KS_STAT_DRIFT = 0.20
+DISCRETE_MAX_VALUES = 12
+BASELINE_SAMPLE = 10_000   # holdout rows used as the reference distribution
+MAX_LIVE_ROWS = 50_000     # most recent live rows considered per report
 MIN_LIVE_DEFAULT = 50      # minimum live rows before reporting
-
-_CAT_COLS = {"REGION", "TENURE", "MRG", "TOP_PACK"}
-_FLOAT_COLS = {
-    "MONTANT", "FREQUENCE_RECH", "REVENUE", "ARPU_SEGMENT", "FREQUENCE",
-    "DATA_VOLUME", "ON_NET", "ORANGE", "TIGO", "ZONE1", "ZONE2",
-    "REGULARITY", "FREQ_TOP_PACK",
-}
+PREDICTION_FEATURE = "churn_probability"
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -55,10 +56,11 @@ _FLOAT_COLS = {
 @dataclass
 class FeatureDriftResult:
     feature: str
+    kind: str                    # "continuous" | "discrete"
     psi: float
-    ks_statistic: float
-    ks_pvalue: float
-    status: str         # "OK" | "WARN" | "DRIFT"
+    ks_statistic: float | None
+    ks_pvalue: float | None
+    status: str                  # "OK" | "WARN" | "DRIFT"
     n_live: int
 
 
@@ -72,9 +74,25 @@ class DriftReport:
     n_warned: int
     overall_status: str  # "OK" | "WARN" | "DRIFT" | "INSUFFICIENT_DATA"
     features: list[FeatureDriftResult] = field(default_factory=list)
+    prediction_drift: FeatureDriftResult | None = None
 
 
-# ── PSI helper ────────────────────────────────────────────────────────────────
+class LiveRowSource(Protocol):
+    """Where live traffic comes from (PredictionLogger implements this)."""
+
+    def fetch_window(
+        self, since_hours: int, max_rows: int
+    ) -> list[tuple[dict[str, Any], float]]: ...
+
+
+@dataclass
+class _Reference:
+    values: np.ndarray
+    edges: np.ndarray
+    kind: str
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 
 def compute_psi(
@@ -96,107 +114,91 @@ def compute_psi(
     return float(np.sum((act_pct - exp_pct) * np.log(act_pct / exp_pct)))
 
 
-# ── Feature status helper ──────────────────────────────────────────────────────
+def _reference(values: np.ndarray) -> _Reference:
+    """Bin edges for one baseline column: per-value for discrete, deciles otherwise."""
+    uniq = np.unique(values)
+    if len(uniq) <= DISCRETE_MAX_VALUES:
+        if len(uniq) == 1:
+            edges = np.array([-np.inf, np.inf])
+        else:
+            mids = (uniq[:-1] + uniq[1:]) / 2
+            edges = np.concatenate([[-np.inf], mids, [np.inf]])
+        return _Reference(values, edges, "discrete")
+    edges = np.unique(np.percentile(values, np.linspace(0, 100, PSI_BINS + 1)))
+    if len(edges) < 2:
+        edges = np.array([-np.inf, np.inf])
+    else:
+        edges[0], edges[-1] = -np.inf, np.inf
+    return _Reference(values, edges, "continuous")
 
 
-def _feature_status(psi: float, ks_pvalue: float) -> str:
-    if psi > PSI_DRIFT or ks_pvalue < KS_DRIFT:
-        return "DRIFT"
-    if psi > PSI_WARN or ks_pvalue < KS_WARN:
-        return "WARN"
-    return "OK"
+def _severity(value: float, warn: float, drift: float) -> int:
+    return 2 if value > drift else 1 if value > warn else 0
 
 
-# ── Raw-input → DataFrame (mirrors app._to_dataframe) ────────────────────────
+_STATUS = ("OK", "WARN", "DRIFT")
 
 
-def _raw_inputs_to_df(raw_inputs: list[dict[str, Any]]) -> pd.DataFrame:
-    df = pd.DataFrame(raw_inputs)
-    for col in _CAT_COLS:
-        if col in df.columns:
-            df[col] = df[col].astype("category")
-    for col in _FLOAT_COLS:
-        if col in df.columns:
-            df[col] = df[col].astype("float32")
-    return df
+def _compare(name: str, ref: _Reference, live: np.ndarray) -> FeatureDriftResult:
+    psi = compute_psi(ref.values, live, ref.edges)
+    severity = _severity(psi, PSI_WARN, PSI_DRIFT)
+    ks_stat: float | None = None
+    ks_p: float | None = None
+    if ref.kind == "continuous":
+        ks = ks_2samp(ref.values, live)
+        ks_stat, ks_p = float(ks.statistic), float(ks.pvalue)
+        severity = max(severity, _severity(ks_stat, KS_STAT_WARN, KS_STAT_DRIFT))
+    return FeatureDriftResult(
+        feature=name,
+        kind=ref.kind,
+        psi=round(psi, 4),
+        ks_statistic=round(ks_stat, 4) if ks_stat is not None else None,
+        ks_pvalue=round(ks_p, 4) if ks_p is not None else None,
+        status=_STATUS[severity],
+        n_live=int(len(live)),
+    )
 
 
 # ── DriftDetector ─────────────────────────────────────────────────────────────
 
 
 class DriftDetector:
-    """Computes per-feature drift between live prediction inputs and training baseline."""
+    """Per-feature and prediction drift between live traffic and the holdout baseline."""
 
     def __init__(
         self,
         pipeline: FeaturePipeline,
+        model: Any,
         feature_cols: list[str],
-        features_dir: Path,
-        pred_db: Path,
+        baseline_path: Path,
+        live_source: LiveRowSource,
     ) -> None:
         self.pipeline = pipeline
         self.feature_cols = feature_cols
-        self.pred_db = pred_db
+        self.live_source = live_source
 
-        # Precompute baseline arrays and bin edges from a sample of train features
-        self._baseline, self._bin_edges = self._build_baseline(features_dir)
-
-    def _build_baseline(
-        self, features_dir: Path
-    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-        df = pd.read_parquet(features_dir / "train_features.parquet")[self.feature_cols]
+        df = pd.read_parquet(baseline_path)[feature_cols]
         if len(df) > BASELINE_SAMPLE:
             df = df.sample(n=BASELINE_SAMPLE, random_state=42)
 
-        baseline: dict[str, np.ndarray] = {}
-        bin_edges: dict[str, np.ndarray] = {}
-        for col in self.feature_cols:
+        self._refs: dict[str, _Reference] = {}
+        for col in feature_cols:
             vals = df[col].dropna().to_numpy(dtype=np.float64)
-            if len(vals) == 0:
-                continue
-            baseline[col] = vals
-            edges = np.percentile(vals, np.linspace(0, 100, PSI_BINS + 1))
-            edges = np.unique(edges)
-            if len(edges) < 2:
-                edges = np.array([-np.inf, np.inf])
-            else:
-                edges[0], edges[-1] = -np.inf, np.inf
-            bin_edges[col] = edges
+            if len(vals):
+                self._refs[col] = _reference(vals)
 
-        return baseline, bin_edges
-
-    @contextmanager
-    def _db_connect(self) -> Generator[sqlite3.Connection, None, None]:
-        conn = sqlite3.connect(self.pred_db, check_same_thread=False)
-        try:
-            yield conn
-        finally:
-            conn.close()
-
-    def _fetch_live_raw(self, since_hours: int) -> list[dict[str, Any]]:
-        if not self.pred_db.exists():
-            return []
-        since = (
-            datetime.now(UTC) - timedelta(hours=since_hours)
-        ).isoformat()
-        with self._db_connect() as conn:
-            rows = conn.execute(
-                "SELECT r.features_json FROM prediction_rows r "
-                "JOIN prediction_requests q ON r.request_id = q.request_id "
-                "WHERE q.ts >= ?",
-                (since,),
-            ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        scores = model.predict_proba(df.to_numpy(dtype=np.float32))[:, 1]
+        self._pred_ref = _reference(np.asarray(scores, dtype=np.float64))
 
     def detect(
         self,
         hours: int = 24,
         min_samples: int = MIN_LIVE_DEFAULT,
     ) -> DriftReport:
-        """Run drift detection over the last `hours` of prediction traffic."""
+        """Run drift detection over the most recent `hours` of prediction traffic."""
         report_time = datetime.now(UTC).isoformat()
-        raw_inputs = self._fetch_live_raw(hours)
-        n_live = len(raw_inputs)
+        live_rows = self.live_source.fetch_window(hours, MAX_LIVE_ROWS)
+        n_live = len(live_rows)
 
         if n_live < min_samples:
             return DriftReport(
@@ -210,44 +212,25 @@ class DriftDetector:
                 features=[],
             )
 
-        # Transform raw inputs → engineered features (same pipeline as /predict)
-        live_raw_df = _raw_inputs_to_df(raw_inputs)
-        live_eng_df = self.pipeline.transform(live_raw_df)[self.feature_cols]
+        raw_df = records_to_frame([raw for raw, _ in live_rows])
+        live_df = self.pipeline.transform(raw_df)[self.feature_cols]
 
         results: list[FeatureDriftResult] = []
-        for col in self.feature_cols:
-            if col not in self._baseline:
-                continue
-            baseline_vals = self._baseline[col]
-            live_vals = live_eng_df[col].dropna().to_numpy(dtype=np.float64)
-            if len(live_vals) == 0:
-                continue
+        for col, ref in self._refs.items():
+            live_vals = live_df[col].dropna().to_numpy(dtype=np.float64)
+            if len(live_vals):
+                results.append(_compare(col, ref, live_vals))
 
-            psi = compute_psi(baseline_vals, live_vals, self._bin_edges[col])
-            ks_stat, ks_pval = ks_2samp(baseline_vals, live_vals)
-            status = _feature_status(psi, ks_pval)
+        order = {"DRIFT": 0, "WARN": 1, "OK": 2}
+        results.sort(key=lambda r: (order[r.status], r.feature))
 
-            results.append(
-                FeatureDriftResult(
-                    feature=col,
-                    psi=round(psi, 4),
-                    ks_statistic=round(float(ks_stat), 4),
-                    ks_pvalue=round(float(ks_pval), 4),
-                    status=status,
-                    n_live=int(len(live_vals)),
-                )
-            )
+        live_probs = np.array([p for _, p in live_rows], dtype=np.float64)
+        prediction = _compare(PREDICTION_FEATURE, self._pred_ref, live_probs)
 
-        # Sort: DRIFT first, then WARN, then OK; alphabetical within each group
-        _order = {"DRIFT": 0, "WARN": 1, "OK": 2}
-        results.sort(key=lambda r: (_order[r.status], r.feature))
-
-        n_drifted = sum(1 for r in results if r.status == "DRIFT")
-        n_warned = sum(1 for r in results if r.status == "WARN")
-
-        if n_drifted > 0:
+        statuses = [r.status for r in results] + [prediction.status]
+        if "DRIFT" in statuses:
             overall = "DRIFT"
-        elif n_warned > 0:
+        elif "WARN" in statuses:
             overall = "WARN"
         else:
             overall = "OK"
@@ -257,8 +240,9 @@ class DriftDetector:
             window_hours=hours,
             n_live_predictions=n_live,
             n_features_checked=len(results),
-            n_drifted=n_drifted,
-            n_warned=n_warned,
+            n_drifted=sum(1 for r in results if r.status == "DRIFT"),
+            n_warned=sum(1 for r in results if r.status == "WARN"),
             overall_status=overall,
             features=results,
+            prediction_drift=prediction,
         )

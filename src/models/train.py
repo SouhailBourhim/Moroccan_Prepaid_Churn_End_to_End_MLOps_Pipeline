@@ -8,31 +8,39 @@ pre-computed feature matrix produced by `src.features.run_pipeline`:
   3. LGBMClassifier      — leaf-wise boosting, often fastest at matching AUC
   4. CatBoostClassifier  — robust on zero-inflated / mixed-type tabular data
 
-The best model by mean CV ROC-AUC is refitted on all available training
-data and saved as a joblib artifact alongside a JSON training manifest.
+Protocol (all on the training split; the labeled holdout is never touched here):
+  - Stratified k-fold CV. Boosters early-stop on an inner split of each training
+    fold (src.models.fitting), never on the fold being scored.
+  - The best model by mean CV ROC-AUC is refit on all training rows with the
+    mean early-stopped round count from CV.
+  - A calibrator is fit on the winner's out-of-fold predictions
+    (src.models.calibrate), and decision thresholds (Youden-J, F1) are chosen on
+    cross-fitted calibrated OOF probabilities. The holdout evaluation
+    (src.models.evaluate_run) then applies those frozen thresholds.
+
+Artifacts (models/{dataset}/):
+    model.pkl               {"model": CalibratedChurnModel, "feature_cols", "thresholds", …}
+    training_manifest.json  CV results, calibration choice, thresholds, OOF metrics
 
 Prerequisite:
-    python -m src.features.run_pipeline   # produces data/features/train_features.parquet
+    python -m src.features.run_pipeline --dataset expresso
 
 Usage:
-    python -m src.models.train
-    python -m src.models.train --config configs/base.yaml --no-mlflow
+    python -m src.models.train --dataset expresso
+    python -m src.models.train --dataset moroccan --no-mlflow
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import joblib
-import mlflow
 import numpy as np
 import pandas as pd
-import yaml
 from catboost import CatBoostClassifier
 from lightgbm import LGBMClassifier
 from loguru import logger
@@ -44,17 +52,14 @@ from sklearn.pipeline import Pipeline as SKPipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
+from src.models.calibrate import CalibratedChurnModel, fit_calibration
+from src.models.evaluate import compute_metrics, optimal_threshold
+from src.models.fitting import fit_with_early_stopping, refit_with_iterations
+from src.utils.config import BASE_CONFIG, DATASETS, dataset_paths, load_config, setup_mlflow
 from src.utils.logging import setup_logger
 
-ROOT = Path(__file__).parents[2]
-CONFIG_PATH = ROOT / "configs" / "base.yaml"
-FEATURES_DIR = ROOT / "data" / "features"
-MODELS_DIR = ROOT / "models"
-
-
-def _load_config(path: Path) -> dict[str, Any]:
-    with open(path) as fh:
-        return yaml.safe_load(fh)  # type: ignore[no-any-return]
+# The operating point the API uses when a request does not pass a threshold.
+DEFAULT_THRESHOLD_STRATEGY = "f1"
 
 
 # ── Data classes ───────────────────────────────────────────────────────────────
@@ -65,7 +70,7 @@ class Candidate:
     name: str
     model: Any
     params: dict[str, Any] = field(default_factory=dict)
-    early_stopping_rounds: int = 0  # 0 = disabled; tree models set this to 50
+    early_stopping_rounds: int = 0  # 0 = disabled; boosters use training.early_stopping_rounds
 
 
 @dataclass
@@ -76,6 +81,8 @@ class CVResult:
     pr_auc_mean: float
     pr_auc_std: float
     params: dict[str, Any] = field(default_factory=dict)
+    # Mean early-stopped boosting rounds across folds (None for non-boosters).
+    mean_best_iteration: int | None = None
 
 
 # ── Candidate construction ─────────────────────────────────────────────────────
@@ -93,6 +100,7 @@ def build_candidates(cfg: dict[str, Any], scale_pos_weight: float) -> list[Candi
     lgb = cfg["lightgbm"]
     cb = cfg.get("catboost", {})
     lr = cfg.get("logistic_regression", {})
+    es_rounds = int(cfg["training"].get("early_stopping_rounds", 50))
 
     return [
         Candidate(
@@ -121,15 +129,19 @@ def build_candidates(cfg: dict[str, Any], scale_pos_weight: float) -> list[Candi
                 min_child_weight=int(xgb["min_child_weight"]),
                 reg_alpha=float(xgb["reg_alpha"]),
                 reg_lambda=float(xgb["reg_lambda"]),
+                gamma=float(xgb.get("gamma", 0.0)),
                 scale_pos_weight=round(scale_pos_weight, 3),
-                early_stopping_rounds=int(cfg["training"].get("early_stopping_rounds", 50)),
                 eval_metric="auc",
                 random_state=rs,
                 n_jobs=-1,
                 verbosity=0,
             ),
-            params={**xgb, "scale_pos_weight": round(scale_pos_weight, 3)},
-            early_stopping_rounds=int(cfg["training"].get("early_stopping_rounds", 50)),
+            params={
+                **xgb,
+                "gamma": float(xgb.get("gamma", 0.0)),
+                "scale_pos_weight": round(scale_pos_weight, 3),
+            },
+            early_stopping_rounds=es_rounds,
         ),
         Candidate(
             name="lightgbm",
@@ -139,17 +151,20 @@ def build_candidates(cfg: dict[str, Any], scale_pos_weight: float) -> list[Candi
                 learning_rate=float(lgb["learning_rate"]),
                 num_leaves=int(lgb["num_leaves"]),
                 subsample=float(lgb["subsample"]),
+                # LightGBM ignores `subsample` unless bagging is enabled via subsample_freq.
+                subsample_freq=1,
                 colsample_bytree=float(lgb["colsample_bytree"]),
                 min_child_samples=int(lgb["min_child_samples"]),
                 reg_alpha=float(lgb["reg_alpha"]),
                 reg_lambda=float(lgb["reg_lambda"]),
                 is_unbalance=True,
+                metric="auc",
                 random_state=rs,
                 n_jobs=-1,
                 verbosity=-1,
             ),
-            params={**lgb, "is_unbalance": True},
-            early_stopping_rounds=int(cfg["training"].get("early_stopping_rounds", 50)),
+            params={**lgb, "is_unbalance": True, "subsample_freq": 1},
+            early_stopping_rounds=es_rounds,
         ),
         Candidate(
             name="catboost",
@@ -162,52 +177,20 @@ def build_candidates(cfg: dict[str, Any], scale_pos_weight: float) -> list[Candi
                 colsample_bylevel=float(cb.get("colsample_bylevel", 0.8)),
                 min_data_in_leaf=int(cb.get("min_data_in_leaf", 50)),
                 auto_class_weights="Balanced",
-                early_stopping_rounds=int(cfg["training"].get("early_stopping_rounds", 50)),
+                eval_metric="AUC",
                 random_seed=rs,
                 verbose=0,
                 allow_writing_files=False,
             ),
             params={**cb, "auto_class_weights": "Balanced"},
-            early_stopping_rounds=int(cfg["training"].get("early_stopping_rounds", 50)),
+            early_stopping_rounds=es_rounds,
         ),
     ]
 
 
+
+
 # ── Cross-validation ───────────────────────────────────────────────────────────
-
-
-def _fit(
-    model: Any,
-    X_tr: np.ndarray,
-    y_tr: np.ndarray,
-    X_val: np.ndarray,
-    y_val: np.ndarray,
-    early_stopping_rounds: int,
-) -> None:
-    """Fit a model, passing eval_set for tree models that support early stopping.
-
-    Each library has a different API:
-      XGBoost    — early_stopping_rounds set in constructor; needs eval_set in fit()
-      LightGBM   — early stopping via callbacks passed to fit()
-      CatBoost   — early_stopping_rounds set in constructor; needs eval_set in fit()
-      LR Pipeline — no early stopping; plain fit()
-    """
-    if early_stopping_rounds > 0 and isinstance(model, XGBClassifier):
-        model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
-    elif early_stopping_rounds > 0 and isinstance(model, LGBMClassifier):
-        import lightgbm as lgb  # local import avoids top-level lgb namespace clash
-        model.fit(
-            X_tr, y_tr,
-            eval_set=[(X_val, y_val)],
-            callbacks=[
-                lgb.early_stopping(early_stopping_rounds, verbose=False),
-                lgb.log_evaluation(-1),
-            ],
-        )
-    elif early_stopping_rounds > 0 and isinstance(model, CatBoostClassifier):
-        model.fit(X_tr, y_tr, eval_set=(X_val, y_val))
-    else:
-        model.fit(X_tr, y_tr)
 
 
 def _cv_score(
@@ -215,27 +198,38 @@ def _cv_score(
     X: np.ndarray,
     y: np.ndarray,
     cv: StratifiedKFold,
-) -> CVResult:
-    """Run stratified k-fold CV for one candidate and return ROC-AUC / PR-AUC."""
+    random_state: int,
+) -> tuple[CVResult, np.ndarray]:
+    """Run stratified k-fold CV for one candidate.
+
+    Returns the CV summary and the out-of-fold predicted probabilities (each row
+    scored by the fold model that did not train on it).
+    """
     roc_scores: list[float] = []
     pr_scores: list[float] = []
+    best_iters: list[int] = []
+    oof = np.zeros(len(y), dtype=np.float64)
     t0 = time.perf_counter()
 
     for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X, y)):
-        X_tr, X_val = X[train_idx], X[val_idx]
-        y_tr, y_val = y[train_idx], y[val_idx]
-
         model = clone(candidate.model)
-        _fit(model, X_tr, y_tr, X_val, y_val, candidate.early_stopping_rounds)
-        y_prob: np.ndarray = model.predict_proba(X_val)[:, 1]
+        n_iter = fit_with_early_stopping(
+            model, X[train_idx], y[train_idx],
+            rounds=candidate.early_stopping_rounds,
+            random_state=random_state + fold_idx,
+        )
+        if n_iter is not None:
+            best_iters.append(n_iter)
+        y_prob: np.ndarray = model.predict_proba(X[val_idx])[:, 1]
+        oof[val_idx] = y_prob
 
-        fold_roc = float(roc_auc_score(y_val, y_prob))
-        fold_pr = float(average_precision_score(y_val, y_prob))
+        fold_roc = float(roc_auc_score(y[val_idx], y_prob))
+        fold_pr = float(average_precision_score(y[val_idx], y_prob))
         roc_scores.append(fold_roc)
         pr_scores.append(fold_pr)
         logger.debug(
             f"  [{candidate.name}] fold {fold_idx + 1}: "
-            f"ROC-AUC={fold_roc:.4f}  PR-AUC={fold_pr:.4f}"
+            f"ROC-AUC={fold_roc:.4f}  PR-AUC={fold_pr:.4f}  iters={n_iter}"
         )
 
     elapsed = time.perf_counter() - t0
@@ -246,48 +240,61 @@ def _cv_score(
         pr_auc_mean=float(np.mean(pr_scores)),
         pr_auc_std=float(np.std(pr_scores)),
         params=candidate.params,
+        mean_best_iteration=int(np.mean(best_iters)) if best_iters else None,
     )
     logger.info(
         f"[{candidate.name}] CV ROC-AUC={result.roc_auc_mean:.4f} ± {result.roc_auc_std:.4f}"
-        f"  PR-AUC={result.pr_auc_mean:.4f}  ({elapsed:.1f}s)"
+        f"  PR-AUC={result.pr_auc_mean:.4f}  iters={result.mean_best_iteration}"
+        f"  ({elapsed:.1f}s)"
     )
-    return result
+    return result, oof
 
 
-def _fit_final_model(model: Any, X: np.ndarray, y: np.ndarray) -> None:
-    """Fit the selected model on all rows without CV-only early stopping settings."""
-    if isinstance(model, XGBClassifier):
-        # XGBoost requires an eval_set whenever early_stopping_rounds is configured.
-        # The final refit intentionally uses all rows, so disable early stopping here.
-        model.set_params(early_stopping_rounds=None)
-    model.fit(X, y)
+def _threshold_metrics(
+    y: np.ndarray, probs: np.ndarray, thresholds: dict[str, float]
+) -> dict[str, float]:
+    """F1 / precision / recall at each named threshold, keyed '{name}_{metric}'."""
+    out: dict[str, float] = {}
+    for name, t in thresholds.items():
+        m = compute_metrics(y, probs, threshold=t)
+        for key in ("f1", "precision", "recall"):
+            out[f"{name}_{key}"] = m[key]
+    return out
 
 
 # ── Main training function ────────────────────────────────────────────────────
 
 
-def train(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> CVResult:
-    """Run CV for all candidates, log to MLflow, refit best model, save artifacts.
+def train(
+    dataset: str = "expresso",
+    use_mlflow: bool = True,
+    config_path: Path = BASE_CONFIG,
+) -> CVResult:
+    """Run CV for all candidates, refit + calibrate the best, save artifacts.
 
     Returns the CVResult for the winning candidate.
     """
     setup_logger()
-    cfg = _load_config(config_path)
+    cfg = load_config(dataset, config_path)
+    paths = dataset_paths(dataset)
+    paths.ensure_dirs()
     training_cfg = cfg["training"]
+    rs = int(training_cfg["random_state"])
+    cv_folds = int(training_cfg["cv_folds"])
 
-    # ── 1. Load pre-computed features ─────────────────────────────────────────
-    features_path = FEATURES_DIR / "train_features.parquet"
-    if not features_path.exists():
+    # ── 1. Load pre-computed training features (holdout is a separate file) ───
+    if not paths.train_features.exists():
         raise FileNotFoundError(
-            f"{features_path} not found — run `python -m src.features.run_pipeline` first."
+            f"{paths.train_features} not found — run "
+            f"`python -m src.features.run_pipeline --dataset {dataset}` first."
         )
 
-    df = pd.read_parquet(features_path)
+    df = pd.read_parquet(paths.train_features)
     y = df["CHURN"].to_numpy(dtype=np.float32)
     feature_cols = [c for c in df.columns if c != "CHURN"]
     X = df[feature_cols].to_numpy(dtype=np.float32)
     logger.info(
-        f"Features loaded: {X.shape[0]:,} rows × {X.shape[1]} cols  "
+        f"[{dataset}] Training features: {X.shape[0]:,} rows × {X.shape[1]} cols  "
         f"churn rate={y.mean():.3%}"
     )
 
@@ -306,47 +313,73 @@ def train(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> CVResult:
     candidates = build_candidates(cfg, scale_pos_weight)
 
     # ── 3. Cross-validate all candidates ─────────────────────────────────────
-    # Note: target encoding in FeaturePipeline was fit on the full training set
-    # before this point (run_pipeline.py saved the parquet). CV here scores models
-    # on features with mild target-encoding leakage. With smoothing=20 this is
-    # negligible in practice, but a future improvement could refit the pipeline
-    # inside each fold.
-    cv = StratifiedKFold(
-        n_splits=int(training_cfg["cv_folds"]),
-        shuffle=True,
-        random_state=int(training_cfg["random_state"]),
-    )
+    # Target encodings in train_features.parquet are cross-fitted (see
+    # FeaturePipeline), so no row's own label is encoded into its features.
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=rs)
     results: list[CVResult] = []
+    oof_by_model: dict[str, np.ndarray] = {}
     for candidate in candidates:
         logger.info(f"CV scoring {candidate.name}…")
-        results.append(_cv_score(candidate, X, y, cv))
+        result, oof = _cv_score(candidate, X, y, cv, rs)
+        results.append(result)
+        oof_by_model[candidate.name] = oof
 
     # ── 4. Pick best by mean CV ROC-AUC ──────────────────────────────────────
     best = max(results, key=lambda r: r.roc_auc_mean)
     best_candidate = next(c for c in candidates if c.name == best.name)
     logger.info(
-        f"\nBest model: {best.name}  "
+        f"Best model: {best.name}  "
         f"ROC-AUC={best.roc_auc_mean:.4f} ± {best.roc_auc_std:.4f}"
     )
 
-    # ── 5. Refit best on full training data ───────────────────────────────────
-    logger.info(f"Refitting {best.name} on full training set…")
+    # ── 5. Refit best on all training rows with the CV round count ────────────
+    logger.info(f"Refitting {best.name} on all training rows (iters={best.mean_best_iteration})…")
     t0 = time.perf_counter()
-    final_model = clone(best_candidate.model)
-    _fit_final_model(final_model, X, y)
+    final_model = refit_with_iterations(
+        clone(best_candidate.model), X, y, best.mean_best_iteration
+    )
     logger.info(f"Refit complete ({time.perf_counter() - t0:.1f}s)")
 
-    # ── 6. Save artifacts ─────────────────────────────────────────────────────
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    model_path = MODELS_DIR / "best_model.pkl"
+    # ── 6. Calibrate on OOF scores; choose thresholds on cross-fitted OOF ─────
+    oof_raw = oof_by_model[best.name]
+    calibration = fit_calibration(oof_raw, y, cv_folds=cv_folds, random_state=rs)
+    oof_cal = calibration.cross_fitted
+    thresholds = {
+        "youden": optimal_threshold(y, oof_cal, strategy="youden"),
+        "f1": optimal_threshold(y, oof_cal, strategy="f1"),
+    }
+    default_threshold = thresholds[DEFAULT_THRESHOLD_STRATEGY]
+    oof_metrics: dict[str, float] = {
+        "raw_brier": compute_metrics(y, oof_raw)["brier"],
+        "calibrated_brier": compute_metrics(y, oof_cal)["brier"],
+        **_threshold_metrics(y, oof_cal, thresholds),
+    }
+    rounded = {k: round(v, 4) for k, v in thresholds.items()}
+    logger.info(
+        f"Calibration: {calibration.method}  CV Brier by method={calibration.brier_by_method}"
+        f"  thresholds={rounded}"
+    )
+    wrapped = CalibratedChurnModel(final_model, calibration.calibrator, calibration.method)
+
+    # ── 7. Save artifacts ─────────────────────────────────────────────────────
     manifest: dict[str, Any] = {
+        "dataset": dataset,
         "best_model": best.name,
         "cv_roc_auc_mean": best.roc_auc_mean,
         "cv_roc_auc_std": best.roc_auc_std,
         "cv_pr_auc_mean": best.pr_auc_mean,
         "cv_pr_auc_std": best.pr_auc_std,
+        "n_iterations": best.mean_best_iteration,
         "n_features": len(feature_cols),
         "feature_cols": feature_cols,
+        "calibration": {
+            "method": calibration.method,
+            "cv_brier_by_method": calibration.brier_by_method,
+        },
+        "thresholds": thresholds,
+        "default_threshold_strategy": DEFAULT_THRESHOLD_STRATEGY,
+        "default_threshold": default_threshold,
+        "oof_metrics": oof_metrics,
         "all_results": [
             {
                 "name": r.name,
@@ -354,35 +387,39 @@ def train(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> CVResult:
                 "roc_auc_std": r.roc_auc_std,
                 "pr_auc_mean": r.pr_auc_mean,
                 "pr_auc_std": r.pr_auc_std,
+                "mean_best_iteration": r.mean_best_iteration,
                 "params": r.params,
             }
             for r in results
         ],
     }
-
-    joblib.dump({"model": final_model, "feature_cols": feature_cols}, model_path)
-    manifest_path = MODELS_DIR / "training_manifest.json"
-    with open(manifest_path, "w") as fh:
+    artifact: dict[str, Any] = {
+        "model": wrapped,
+        "model_name": best.name,
+        "dataset": dataset,
+        "feature_cols": feature_cols,
+        "thresholds": thresholds,
+        "default_threshold": default_threshold,
+        "calibration_method": calibration.method,
+    }
+    joblib.dump(artifact, paths.model)
+    with open(paths.training_manifest, "w") as fh:
         json.dump(manifest, fh, indent=2)
-    logger.info(f"Saved: {model_path}  {manifest_path}")
+    logger.info(f"Saved: {paths.model}  {paths.training_manifest}")
 
-    # ── 7. MLflow ─────────────────────────────────────────────────────────────
+    # ── 8. MLflow ─────────────────────────────────────────────────────────────
     if use_mlflow:
-        mlflow_cfg = cfg.get("mlflow", {})
-        tracking_uri = str(mlflow_cfg.get("tracking_uri", "mlruns"))
-        # Respect absolute paths and remote URIs; only prefix ROOT for relative paths.
-        if "://" in tracking_uri or os.path.isabs(tracking_uri):
-            resolved_uri = tracking_uri
-        else:
-            resolved_uri = str(ROOT / tracking_uri)
-        mlflow.set_tracking_uri(resolved_uri)
-        mlflow.set_experiment(mlflow_cfg.get("experiment_name", "moroccan_prepaid_churn"))
+        import mlflow
 
-        with mlflow.start_run(run_name=f"training__{best.name}"):
+        setup_mlflow(cfg)
+        with mlflow.start_run(run_name=f"training__{dataset}__{best.name}"):
+            mlflow.log_param("dataset", dataset)
             mlflow.log_param("best_model", best.name)
             mlflow.log_param("n_features", X.shape[1])
-            mlflow.log_param("cv_folds", training_cfg["cv_folds"])
+            mlflow.log_param("cv_folds", cv_folds)
             mlflow.log_param("scale_pos_weight", round(scale_pos_weight, 3))
+            mlflow.log_param("calibration_method", calibration.method)
+            mlflow.log_param("n_iterations", best.mean_best_iteration)
             mlflow.log_params({f"best__{k}": v for k, v in best.params.items()})
 
             for result in results:
@@ -390,9 +427,13 @@ def train(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> CVResult:
                 mlflow.log_metric(f"{result.name}__cv_roc_auc_std", result.roc_auc_std)
                 mlflow.log_metric(f"{result.name}__cv_pr_auc_mean", result.pr_auc_mean)
                 mlflow.log_metric(f"{result.name}__cv_pr_auc_std", result.pr_auc_std)
+            for key, value in oof_metrics.items():
+                mlflow.log_metric(f"oof__{key}", value)
+            for name, t in thresholds.items():
+                mlflow.log_metric(f"threshold__{name}", t)
 
-            mlflow.log_artifact(str(model_path), "model")
-            mlflow.log_artifact(str(manifest_path), "model")
+            mlflow.log_artifact(str(paths.model), "model")
+            mlflow.log_artifact(str(paths.training_manifest), "model")
 
             run = mlflow.active_run()
             if run is not None:
@@ -405,12 +446,13 @@ def train(use_mlflow: bool = True, config_path: Path = CONFIG_PATH) -> CVResult:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train Expresso churn candidate models")
-    p.add_argument("--config", type=Path, default=CONFIG_PATH)
+    p = argparse.ArgumentParser(description="Train churn candidate models")
+    p.add_argument("--dataset", choices=DATASETS, default="expresso")
+    p.add_argument("--config", type=Path, default=BASE_CONFIG)
     p.add_argument("--no-mlflow", dest="use_mlflow", action="store_false")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    train(use_mlflow=args.use_mlflow, config_path=args.config)
+    train(dataset=args.dataset, use_mlflow=args.use_mlflow, config_path=args.config)

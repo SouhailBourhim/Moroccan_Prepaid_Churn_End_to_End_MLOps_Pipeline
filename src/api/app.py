@@ -1,28 +1,27 @@
-"""FastAPI application for real-time Expresso churn prediction.
+"""FastAPI application for real-time prepaid churn prediction.
 
-Startup loads the feature pipeline and trained model into app.state once;
-every /predict request reuses those in-memory artifacts.
+Startup loads the feature pipeline and the calibrated model for one dataset
+(models/{dataset}/model.pkl) into app.state once; every /predict request reuses
+those in-memory artifacts.
 
 Run locally:
-    uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
+    CHURN_AUTH_DISABLED=1 uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
 
-Or via config values in configs/base.yaml:
-    uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --workers 4
-
-Auth:
-    Set CHURN_API_KEYS="key1,key2" to enable API-key auth on all protected
-    endpoints. Omitting the variable leaves the API open (local dev mode).
-    /health is always exempt.
-
-Rate limiting:
-    CHURN_RATE_LIMIT_GENERAL (default 200 req/60s) — /ready /info /logs /drift
-    CHURN_RATE_LIMIT_PREDICT (default 30 req/60s)  — /predict
-
-Logging:
-    Set LOG_FORMAT=json for structured JSON output (production log aggregators).
+Environment:
+    CHURN_DATASET            dataset whose model is served (default: api.dataset in
+                             configs/base.yaml)
+    CHURN_API_KEYS           comma-separated API keys for the X-API-Key header
+    CHURN_AUTH_DISABLED=1    run without auth (local development only); with neither
+                             set, protected endpoints return 503
+    CHURN_PREDICTIONS_DB     SQLite prediction log path (default data/predictions.db)
+    CHURN_LOG_RETENTION_DAYS prediction-log retention, pruned at startup (default 30)
+    CHURN_RATE_LIMIT_GENERAL / CHURN_RATE_LIMIT_PREDICT / CHURN_TRUSTED_PROXIES
+                             see src/api/rate_limit.py
+    LOG_FORMAT=json          structured JSON logs for production log aggregators
 """
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -31,12 +30,11 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import numpy as np
-import pandas as pd
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from src.api.auth import require_api_key
+from src.api.auth import auth_disabled, require_api_key
 from src.api.dependencies import ModelArtifacts, load_artifacts
 from src.api.logger import PredictionLogger
 from src.api.rate_limit import general_limiter, predict_limiter
@@ -51,24 +49,22 @@ from src.api.schemas import (
     PredictionResponse,
     ReadyResponse,
     RecentPrediction,
-    SubscriberFeatures,
     SubscriberPrediction,
 )
+from src.data.ingestion import records_to_frame
 from src.monitoring.drift import DriftDetector, DriftReport
+from src.monitoring.drift import FeatureDriftResult as DriftResult
+from src.utils.config import ROOT, dataset_paths, load_config
 from src.utils.logging import setup_logger
 
-ROOT = Path(__file__).parents[2]
-PREDICTIONS_DB = ROOT / "data" / "predictions.db"
-FEATURES_DIR = ROOT / "data" / "features"
 
-# ── Column dtype maps (mirrors ingestion.py) ──────────────────────────────────
+def _served_dataset() -> str:
+    return os.environ.get("CHURN_DATASET") or str(
+        load_config().get("api", {}).get("dataset", "expresso")
+    )
 
-_CAT_COLS = {"REGION", "TENURE", "MRG", "TOP_PACK"}
-_FLOAT_COLS = {
-    "MONTANT", "FREQUENCE_RECH", "REVENUE", "ARPU_SEGMENT", "FREQUENCE",
-    "DATA_VOLUME", "ON_NET", "ORANGE", "TIGO", "ZONE1", "ZONE2",
-    "REGULARITY", "FREQ_TOP_PACK",
-}
+
+PREDICTIONS_DB = Path(os.environ.get("CHURN_PREDICTIONS_DB", ROOT / "data" / "predictions.db"))
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -77,27 +73,40 @@ _FLOAT_COLS = {
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     setup_logger()
+    dataset = _served_dataset()
+    if auth_disabled():
+        logger.warning("CHURN_AUTH_DISABLED is set — API key auth is OFF (development only)")
     try:
-        app.state.artifacts = load_artifacts()
-        logger.info("API ready")
+        app.state.artifacts = load_artifacts(dataset)
+        logger.info(f"API ready (dataset={dataset})")
     except FileNotFoundError as exc:
         logger.warning(f"Model artifacts not found at startup — /predict will return 503. {exc}")
         app.state.artifacts = None
 
-    app.state.pred_logger = PredictionLogger(PREDICTIONS_DB)
-    logger.info(f"Prediction logger ready → {PREDICTIONS_DB}")
+    pred_logger = PredictionLogger(PREDICTIONS_DB)
+    retention_days = int(os.environ.get("CHURN_LOG_RETENTION_DAYS", "30"))
+    pruned = pred_logger.prune(retention_days)
+    app.state.pred_logger = pred_logger
+    logger.info(
+        f"Prediction logger ready → {PREDICTIONS_DB}  "
+        f"(retention {retention_days}d, pruned {pruned} rows)"
+    )
 
-    if app.state.artifacts is not None:
-        art = app.state.artifacts
-        app.state.drift_detector = DriftDetector(
-            pipeline=art.pipeline,
-            feature_cols=art.feature_cols,
-            features_dir=FEATURES_DIR,
-            pred_db=PREDICTIONS_DB,
-        )
-        logger.info("Drift detector ready")
-    else:
-        app.state.drift_detector = None
+    app.state.drift_detector = None
+    art: ModelArtifacts | None = app.state.artifacts
+    if art is not None:
+        baseline = dataset_paths(dataset).holdout_features
+        if baseline.exists():
+            app.state.drift_detector = DriftDetector(
+                pipeline=art.pipeline,
+                model=art.model,
+                feature_cols=art.feature_cols,
+                baseline_path=baseline,
+                live_source=pred_logger,
+            )
+            logger.info("Drift detector ready")
+        else:
+            logger.warning(f"Drift baseline {baseline} not found — /drift will return 503")
 
     yield
 
@@ -109,16 +118,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(
-    title="Expresso Churn Prediction API",
+    title="Prepaid Churn Prediction API",
     description=(
         "Real-time prepaid subscriber churn scoring.\n\n"
         "**POST /predict** — score up to 10 000 subscribers per request.\n"
         "**GET  /logs**    — prediction log summary and recent scored rows.\n"
+        "**GET  /drift**   — feature and prediction drift vs. the holdout baseline.\n"
         "**GET  /info**    — model metadata and CV metrics.\n"
         "**GET  /ready**   — readiness probe (503 until model is loaded).\n"
         "**GET  /health**  — liveness probe (always 200)."
     ),
-    version="1.2.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -155,7 +165,7 @@ def get_drift_detector() -> DriftDetector:
     if detector is None:
         raise HTTPException(
             status_code=503,
-            detail="Drift detector not initialised — model artifacts required.",
+            detail="Drift detector not initialised — needs model artifacts and holdout baseline.",
         )
     return detector
 
@@ -183,20 +193,16 @@ GeneralRateDep = Annotated[None, Depends(check_general_rate)]
 PredictRateDep = Annotated[None, Depends(check_predict_rate)]
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def _to_dataframe(subscribers: list[SubscriberFeatures]) -> pd.DataFrame:
-    """Convert a list of SubscriberFeatures to a typed DataFrame for the pipeline."""
-    rows: list[dict[str, Any]] = [s.model_dump() for s in subscribers]
-    df = pd.DataFrame(rows)
-    for col in _CAT_COLS:
-        if col in df.columns:
-            df[col] = df[col].astype("category")
-    for col in _FLOAT_COLS:
-        if col in df.columns:
-            df[col] = df[col].astype("float32")
-    return df
+def _drift_result(r: DriftResult) -> FeatureDriftResult:
+    return FeatureDriftResult(
+        feature=r.feature,
+        kind=r.kind,
+        psi=r.psi,
+        ks_statistic=r.ks_statistic,
+        ks_pvalue=r.ks_pvalue,
+        status=r.status,
+        n_live=r.n_live,
+    )
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -224,75 +230,89 @@ def info(
     _key: KeyDep,
     _rate: GeneralRateDep,
 ) -> InfoResponse:
-    """Return model name, CV ROC-AUC, and feature count from the training manifest."""
+    """Return model name, dataset, calibration, default threshold, and CV metrics."""
     m = artifacts.manifest
     return InfoResponse(
         model_name=m.get("best_model", "unknown"),
+        dataset=artifacts.dataset,
+        calibration_method=artifacts.calibration_method,
+        default_threshold=artifacts.default_threshold,
         cv_roc_auc_mean=float(m.get("cv_roc_auc_mean", 0.0)),
         cv_roc_auc_std=float(m.get("cv_roc_auc_std", 0.0)),
         cv_pr_auc_mean=float(m.get("cv_pr_auc_mean", 0.0)),
-        n_features=int(m.get("n_features", 0)),
+        n_features=int(m.get("n_features", len(artifacts.feature_cols))),
     )
 
 
 @app.post("/predict", response_model=PredictionResponse, tags=["prediction"])
 def predict(
     request: PredictionRequest,
+    background: BackgroundTasks,
     artifacts: ArtifactsDep,
     pred_logger: LoggerDep,
     _key: KeyDep,
     _rate: PredictRateDep,
 ) -> PredictionResponse:
-    """Score a batch of subscribers and return churn probabilities.
+    """Score a batch of subscribers and return calibrated churn probabilities.
 
     Accepts 1–10 000 subscribers per request. Applies the full feature
-    engineering pipeline before scoring, so raw Expresso columns are expected
-    (not pre-engineered features). Every scored batch is persisted to the
-    prediction log (data/predictions.db).
+    engineering pipeline before scoring, so raw columns are expected (not
+    pre-engineered features). Without an explicit `threshold`, labels use the
+    model's F1-optimal threshold chosen during training. Every scored batch is
+    written to the prediction log after the response is sent.
     """
     t0 = time.perf_counter()
 
-    df = _to_dataframe(request.subscribers)
+    raw_inputs: list[dict[str, Any]] = [s.model_inputs() for s in request.subscribers]
+    df = records_to_frame(raw_inputs)
     X_fe = artifacts.pipeline.transform(df)
     X = X_fe[artifacts.feature_cols].to_numpy(dtype=np.float32)
     probs: np.ndarray = artifacts.model.predict_proba(X)[:, 1]
 
     latency_ms = (time.perf_counter() - t0) * 1000.0
+    threshold = (
+        request.threshold if request.threshold is not None else artifacts.default_threshold
+    )
+    subscriber_ids = [s.subscriber_id for s in request.subscribers]
+    flags = [bool(p >= threshold) for p in probs]
 
     predictions = [
         SubscriberPrediction(
+            subscriber_id=sid,
             churn_probability=float(p),
-            churn_prediction=bool(p >= request.threshold),
+            churn_prediction=flag,
         )
-        for p in probs
+        for sid, p, flag in zip(subscriber_ids, probs, flags, strict=True)
     ]
 
     model_name: str = artifacts.manifest.get("best_model", "unknown")
     request_id = str(uuid.uuid4())
-    raw_inputs: list[dict[str, Any]] = [s.model_dump() for s in request.subscribers]
 
-    pred_logger.log_request(
+    background.add_task(
+        pred_logger.log_request,
         request_id=request_id,
         model_name=model_name,
         n_subscribers=len(predictions),
-        threshold=request.threshold,
+        threshold=threshold,
         latency_ms=latency_ms,
         probs=[float(p) for p in probs],
-        predictions=[bool(p >= request.threshold) for p in probs],
+        predictions=flags,
         raw_inputs=raw_inputs,
+        subscriber_ids=subscriber_ids,
     )
 
     logger.debug(
         f"Scored {len(predictions)} subscribers  "
-        f"threshold={request.threshold}  "
-        f"flagged={sum(s.churn_prediction for s in predictions)}  "
+        f"threshold={threshold:.3f}  "
+        f"flagged={sum(flags)}  "
         f"latency={latency_ms:.1f}ms  "
         f"request_id={request_id}"
     )
     return PredictionResponse(
+        request_id=request_id,
         predictions=predictions,
         model_name=model_name,
-        threshold=request.threshold,
+        threshold=threshold,
         n_subscribers=len(predictions),
     )
 
@@ -305,9 +325,9 @@ def drift(
     hours: int = Query(default=24, ge=1, le=720, description="Look-back window in hours"),
     min_samples: int = Query(default=50, ge=1, description="Minimum live rows required"),
 ) -> DriftResponse:
-    """Return per-feature drift status comparing recent /predict traffic to training baseline.
+    """Per-feature and prediction drift of recent /predict traffic vs. the holdout baseline.
 
-    Uses PSI (Population Stability Index) and KS 2-sample test.
+    Status uses PSI (all features) and the KS statistic (continuous features).
     Returns overall_status='INSUFFICIENT_DATA' when fewer than min_samples rows
     have been logged in the requested window.
     """
@@ -320,17 +340,10 @@ def drift(
         n_drifted=report.n_drifted,
         n_warned=report.n_warned,
         overall_status=report.overall_status,
-        features=[
-            FeatureDriftResult(
-                feature=f.feature,
-                psi=f.psi,
-                ks_statistic=f.ks_statistic,
-                ks_pvalue=f.ks_pvalue,
-                status=f.status,
-                n_live=f.n_live,
-            )
-            for f in report.features
-        ],
+        features=[_drift_result(f) for f in report.features],
+        prediction_drift=(
+            _drift_result(report.prediction_drift) if report.prediction_drift else None
+        ),
     )
 
 
@@ -342,21 +355,12 @@ def logs(
     hours: int = Query(default=24, ge=1, le=720, description="Summary window in hours"),
     limit: int = Query(default=50, ge=1, le=500, description="Max recent rows to return"),
 ) -> LogsResponse:
-    """Return prediction log summary stats and the most recent scored rows.
+    """Return prediction-log statistics and the most recent scored rows.
 
-    - `hours`: time window for the 'predictions_last_Nh' counter (default 24)
+    - `hours`: window for the traffic statistics (counts, mean probability,
+      flag rate, latency). total_predictions / total_requests are all-time.
     - `limit`: number of recent rows to include (default 50, max 500)
     """
-    raw_summary = pred_logger.summary(since_hours=hours)
-    raw_recent = pred_logger.recent(limit=limit)
-
-    summary = LogsSummary(
-        total_predictions=raw_summary["total_predictions"],
-        total_requests=raw_summary["total_requests"],
-        mean_churn_probability=raw_summary["mean_churn_probability"],
-        churn_flag_rate=raw_summary["churn_flag_rate"],
-        mean_latency_ms=raw_summary["mean_latency_ms"],
-    )
-    recent_rows = [RecentPrediction(**row) for row in raw_recent]
-
+    summary = LogsSummary(**pred_logger.summary(since_hours=hours))
+    recent_rows = [RecentPrediction(**row) for row in pred_logger.recent(limit=limit)]
     return LogsResponse(summary=summary, recent=recent_rows)

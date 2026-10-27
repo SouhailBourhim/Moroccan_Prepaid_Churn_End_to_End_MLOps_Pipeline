@@ -4,18 +4,28 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    image: expresso-churn-api:latest
-    container_name: expresso-churn-api
+      args:
+        MODEL_EXTRAS: ${MODEL_EXTRAS:-api,serve-all}
+    image: churn-api:latest
+    container_name: churn-api
     ports:
       - "8000:8000"
-    # Model artifacts are mounted read-only from the host so the image
-    # stays small and models can be updated without rebuilding.
     volumes:
+      # Model artifacts are mounted read-only from the host so the image
+      # stays small and models can be updated without rebuilding.
       - ./models:/app/models:ro
       - ./data/features:/app/data/features:ro
+      # Prediction log (and therefore drift monitoring) persists across restarts.
+      - predictions-db:/app/data/db
     environment:
-      - API_WORKERS=4
+      - CHURN_DATASET=${CHURN_DATASET:-expresso}
+      # Required: protected endpoints return 503 until keys are set (see .env.example).
+      - CHURN_API_KEYS=${CHURN_API_KEYS:-}
+      - CHURN_TRUSTED_PROXIES=${CHURN_TRUSTED_PROXIES:-}
+      - CHURN_LOG_RETENTION_DAYS=${CHURN_LOG_RETENTION_DAYS:-30}
+      - API_WORKERS=${API_WORKERS:-4}
       - LOG_LEVEL=info
+      - LOG_FORMAT=json
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -24,3 +34,6 @@ services:
       retries: 3
       start_period: 20s
     restart: unless-stopped
+
+volumes:
+  predictions-db:

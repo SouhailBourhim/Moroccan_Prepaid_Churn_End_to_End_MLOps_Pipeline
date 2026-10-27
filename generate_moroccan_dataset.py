@@ -8,16 +8,39 @@ Steps
 2. Train CTGAN (sdv library) on the sample.
 3. Generate ~2.4M synthetic rows (20% headroom for class-ratio resampling).
 4. Post-process to enforce Moroccan market constraints:
-   - REGION        → 8 Moroccan cities weighted by population
+   - REGION        → 12 Moroccan cities at population weights. Expresso regions
+                     are relabelled by a churn-rate-ordered (comonotone) mapping,
+                     so the region–churn association learned from Expresso is
+                     kept; which city inherits which Senegalese region's churn
+                     level is arbitrary.
    - OPERATOR      → Inwi / Maroc_Telecom / Orange_Maroc at market shares
+                     (random metadata: carries no churn signal; dropped before
+                     modelling)
    - ARPU_SEGMENT  → calibrated to 25–30 MAD monthly ARPU (Moroccan target)
    - REVENUE / MONTANT → proportionally rescaled with ARPU
-   - DATA_VOLUME   → scaled up for 74 % Moroccan 4G penetration
-   - TOP_PACK      → Moroccan-style pack names (MT Jaweb/Hissab, Inwi Jibi, Orange)
-   - MRG           → allow YES values (~12 %); Expresso dataset is always NO
+   - DATA_VOLUME   → raised to 74 % data users for Moroccan 4G penetration; new
+                     data users are drawn preferentially from active (high
+                     REGULARITY) subscribers rather than uniformly at random
+   - TOP_PACK      → Moroccan-style pack names (MT Jaweb/Hissab, Inwi Jibi,
+                     Orange), mapped from Expresso packs the same comonotone way
+   - MRG           → allow YES values (~12 %); Expresso is always NO, so there
+                     is no signal to transfer and MRG is random (no churn signal)
    - CHURN         → resample classes to 2.7 % monthly churn rate
 5. Subsample to exactly 2 M rows, save to data/raw/moroccan_telecom_churn.csv.
 6. Print a validation report comparing key statistics between datasets.
+
+What this dataset is
+--------------------
+Expresso's joint feature/label distribution (via CTGAN), shifted to a 2.7 %
+churn prior and relabelled with Moroccan names and units. It is useful for
+exercising the pipeline on Moroccan-shaped data; it is not evidence about how
+Moroccan subscribers actually churn.
+
+--no-ctgan draws rows *without replacement* from the full Expresso Train.csv.
+Bootstrapping a small sample with replacement would create many identical rows
+that land on both sides of the train/holdout split and inflate holdout scores;
+if the requested size is not reachable without replacement, the output is
+capped and a warning is printed.
 
 Usage
 -----
@@ -31,7 +54,7 @@ Options
     --n-rows INT         Target output rows (default 2 000 000)
     --epochs INT         CTGAN training epochs (default 300)
     --batch-size INT     CTGAN batch size (default 500)
-    --no-ctgan           Skip CTGAN; use bootstrap resampling + calibration
+    --no-ctgan           Skip CTGAN; resample full Expresso without replacement
     --output PATH        Output CSV path (default data/raw/moroccan_telecom_churn.csv)
 """
 from __future__ import annotations
@@ -122,7 +145,8 @@ OUTPUT_COLS = [
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 
-def _load_expresso_sample(sample_size: int, seed: int) -> pd.DataFrame:
+def _load_expresso_sample(sample_size: int | None, seed: int) -> pd.DataFrame:
+    """Load Expresso Train.csv; stratified-sample `sample_size` rows (None = all rows)."""
     train_path = ROOT / "data" / "raw" / "expresso" / "Train.csv"
     if not train_path.exists():
         sys.exit(f"ERROR: Expresso Train.csv not found at {train_path}")
@@ -130,6 +154,9 @@ def _load_expresso_sample(sample_size: int, seed: int) -> pd.DataFrame:
     print(f"[1/6] Loading Expresso seed from {train_path} …")
     df = pd.read_csv(train_path, usecols=_EXPRESSO_COLS, low_memory=False)
     df["CHURN"] = df["CHURN"].astype(int)
+    if sample_size is None or sample_size >= len(df):
+        print(f"    Expresso rows: {len(df):,}  churn rate={df['CHURN'].mean():.3%}")
+        return df.reset_index(drop=True)
 
     # Stratified sample — preserve Expresso churn ratio
     pos = df[df["CHURN"] == 1]
@@ -190,19 +217,17 @@ def _generate_ctgan(model: Any, n_rows: int) -> pd.DataFrame:
     return df
 
 
-# ── Bootstrap fallback (--no-ctgan) ───────────────────────────────────────────
+# ── Resampling fallback (--no-ctgan) ──────────────────────────────────────────
 
-def _generate_statistical(
-    expresso_sample: pd.DataFrame, n_rows: int, seed: int
-) -> pd.DataFrame:
-    """Bootstrap resample from Expresso — fast, non-parametric, preserves joint distributions."""
-    print(f"[3/6] Bootstrap resampling {n_rows:,} rows (--no-ctgan) …")
+def _generate_statistical(expresso: pd.DataFrame, seed: int) -> pd.DataFrame:
+    """Shuffle real Expresso rows — fast, non-parametric, preserves joint distributions.
+
+    No replacement: every output row is a distinct subscriber, so no row can be
+    duplicated across the downstream train/holdout split.
+    """
+    print(f"[3/6] Shuffling {len(expresso):,} Expresso rows (--no-ctgan, no replacement) …")
     t0 = time.perf_counter()
-    synth = (
-        expresso_sample
-        .sample(n_rows, replace=True, random_state=seed)
-        .reset_index(drop=True)
-    )
+    synth = expresso.sample(frac=1.0, random_state=seed).reset_index(drop=True)
     print(f"    Done  ({time.perf_counter() - t0:.1f}s)")
     return synth
 
@@ -243,11 +268,49 @@ def _assign_user_ids(n: int) -> list[str]:
     return [hashlib.sha1(f"maroc_{i}".encode()).hexdigest() for i in range(n)]
 
 
+def _comonotone_assign(
+    source: pd.Series,
+    churn: pd.Series | None,
+    targets: dict[str, float],
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Relabel `source` categories as `targets` while keeping their link to churn.
+
+    Rows are ordered by the churn rate of their source category (ties broken at
+    random) and cut into consecutive blocks sized by the target weights. The
+    output has exactly the target marginal distribution, and source categories
+    with similar churn rates end up in the same target category — so a feature
+    that predicted churn in Expresso still predicts it after relabelling.
+    Missing source values are treated as their own category. Without CHURN the
+    assignment is uniformly random.
+    """
+    n = len(source)
+    names = list(targets)
+    weights = np.array(list(targets.values()), dtype=float)
+    weights /= weights.sum()
+
+    src = source.astype("object").where(source.notna(), "__MISSING__").astype(str)
+    if churn is not None:
+        y = pd.to_numeric(churn, errors="coerce").fillna(0).clip(0, 1)
+        rate = y.groupby(src).transform("mean").to_numpy(dtype=float)
+    else:
+        rate = np.zeros(n)
+
+    order = np.lexsort((rng.random(n), rate))   # sort by rate, random tiebreak
+    counts = np.floor(weights * n).astype(int)
+    counts[0] += n - counts.sum()
+    out = np.empty(n, dtype=object)
+    out[order] = np.repeat(np.array(names, dtype=object), counts)
+    return out
+
+
 def _assign_region(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
-    cities = list(MOROCCAN_REGIONS.keys())
-    probs  = np.array(list(MOROCCAN_REGIONS.values()), dtype=float)
-    probs /= probs.sum()
-    df["REGION"] = rng.choice(cities, size=len(df), p=probs)
+    source = (
+        df["REGION"] if "REGION" in df.columns
+        else pd.Series(np.nan, index=df.index, dtype=object)
+    )
+    churn = df["CHURN"] if "CHURN" in df.columns else None
+    df["REGION"] = _comonotone_assign(source, churn, MOROCCAN_REGIONS, rng)
     return df
 
 
@@ -294,7 +357,10 @@ def _calibrate_data_volume(df: pd.DataFrame, rng: np.random.Generator) -> pd.Dat
     """Two-step DATA_VOLUME calibration for Moroccan 4G penetration.
 
     1. Convert enough zero-data rows to data users until the non-zero fraction
-       reaches DATA_USER_RATE (74 %).
+       reaches DATA_USER_RATE (74 %). Converts are drawn with probability
+       proportional to REGULARITY + 1: active subscribers are the likeliest
+       data adopters, and choosing uniformly at random would inject label noise
+       (turning inactive, likely-churning subscribers into data users).
     2. Scale all non-zero DATA_VOLUME by DATA_VOL_SCALE (1.8×) — Morocco's
        higher 4G bandwidth means heavier per-session usage.
     """
@@ -310,7 +376,14 @@ def _calibrate_data_volume(df: pd.DataFrame, rng: np.random.Generator) -> pd.Dat
         n_convert = int((DATA_USER_RATE - current_rate) * len(df))
         n_convert = min(n_convert, len(non_user_idx))
         if n_convert > 0:
-            to_convert = rng.choice(non_user_idx, size=n_convert, replace=False)
+            if "REGULARITY" in df.columns:
+                reg = pd.to_numeric(df["REGULARITY"], errors="coerce").fillna(0.0)
+                activity = reg.to_numpy(float)[non_user_idx] + 1.0
+            else:
+                activity = np.ones(len(non_user_idx))
+            to_convert = rng.choice(
+                non_user_idx, size=n_convert, replace=False, p=activity / activity.sum()
+            )
             nz = dv[is_user]
             if len(nz) > 0:
                 mu  = float(np.log(nz + 1).mean())
@@ -330,19 +403,21 @@ def _assign_top_pack(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame
     """Replace Expresso pack names with Moroccan-style pack names.
 
     Preserves the NaN structure from CTGAN: subscribers with no pack stay NaN.
+    Packs are mapped with _comonotone_assign, so the pack–churn association
+    learned from Expresso survives the renaming.
     """
-    packs = [p[0] for p in MOROCCAN_PACKS]
-    probs = np.array([p[1] for p in MOROCCAN_PACKS], dtype=float)
-    probs /= probs.sum()
+    if "TOP_PACK" in df.columns:
+        has_pack = df["TOP_PACK"].notna()
+        source = df.loc[has_pack, "TOP_PACK"]
+    else:
+        has_pack = pd.Series(True, index=df.index)
+        source = pd.Series(np.nan, index=df.index, dtype=object)
+    churn = df.loc[has_pack, "CHURN"] if "CHURN" in df.columns else None
 
-    nan_mask = (
-        df["TOP_PACK"].isna()
-        if "TOP_PACK" in df.columns
-        else pd.Series(False, index=df.index)
-    )
-
-    df["TOP_PACK"] = rng.choice(packs, size=len(df), p=probs)
-    df.loc[nan_mask, "TOP_PACK"] = np.nan
+    packs = pd.Series(np.nan, index=df.index, dtype=object)
+    if has_pack.any():
+        packs.loc[has_pack] = _comonotone_assign(source, churn, dict(MOROCCAN_PACKS), rng)
+    df["TOP_PACK"] = packs
     return df
 
 
@@ -353,14 +428,20 @@ def _assign_mrg(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
 
 
 def _calibrate_churn(
-    df: pd.DataFrame, rng: np.random.Generator, n_target: int
+    df: pd.DataFrame,
+    rng: np.random.Generator,
+    n_target: int,
+    allow_replacement: bool = True,
 ) -> pd.DataFrame:
     """Subsample to n_target rows at TARGET_CHURN_RATE (2.7 %).
 
     Strategy:
-      - Take up to n_churn churners from the pool (sample with replacement
-        only if the pool is too small — rare edge case).
-      - Fill the remaining slots with non-churners.
+      - Take n_churn churners from the pool and fill the remaining slots with
+        non-churners.
+      - With allow_replacement (CTGAN output, where every row is newly sampled)
+        a too-small pool is topped up with replacement — a rare edge case.
+      - Without it (real rows, --no-ctgan) n_target is capped at what the pools
+        support, so no row is ever duplicated.
     This preserves feature distributions within each class as learned by CTGAN.
     """
     if "CHURN" not in df.columns:
@@ -374,6 +455,18 @@ def _calibrate_churn(
 
     churners     = df[df["CHURN"] == 1]
     non_churners = df[df["CHURN"] == 0]
+
+    if not allow_replacement:
+        feasible = min(
+            n_target,
+            int(len(churners) / TARGET_CHURN_RATE),
+            int(len(non_churners) / (1 - TARGET_CHURN_RATE)),
+        )
+        if feasible < n_target:
+            print(f"    WARNING: only {feasible:,} rows reachable at "
+                  f"{TARGET_CHURN_RATE:.1%} churn without duplicating rows "
+                  f"(requested {n_target:,}); output capped.")
+            n_target = feasible
 
     n_churn     = int(n_target * TARGET_CHURN_RATE)
     n_non_churn = n_target - n_churn
@@ -396,7 +489,10 @@ def _calibrate_churn(
 
 
 def _post_process(
-    synth: pd.DataFrame, rng: np.random.Generator, n_target: int
+    synth: pd.DataFrame,
+    rng: np.random.Generator,
+    n_target: int,
+    allow_replacement: bool = True,
 ) -> pd.DataFrame:
     print("[4/6] Applying Moroccan market calibrations …")
     synth = _clean_numerics(synth)
@@ -406,7 +502,7 @@ def _post_process(
     synth = _calibrate_data_volume(synth, rng)
     synth = _assign_top_pack(synth, rng)
     synth = _assign_mrg(synth, rng)
-    synth = _calibrate_churn(synth, rng, n_target)
+    synth = _calibrate_churn(synth, rng, n_target, allow_replacement)
     return synth
 
 
@@ -520,7 +616,7 @@ def main() -> None:
     p.add_argument("--batch-size",  type=int,  default=500,
                    help="CTGAN mini-batch size (default 500)")
     p.add_argument("--no-ctgan",    action="store_true",
-                   help="Skip CTGAN; use bootstrap resampling (fast)")
+                   help="Skip CTGAN; resample full Expresso without replacement (fast)")
     p.add_argument("--output",      type=Path,
                    default=ROOT / "data" / "raw" / "moroccan_telecom_churn.csv")
     args = p.parse_args()
@@ -532,14 +628,13 @@ def main() -> None:
     # Generate 20 % extra rows so churn subsampling never runs out of positives/negatives
     n_generate = int(n_target * 1.25)
 
-    # ── 1. Load Expresso sample ────────────────────────────────────────────────
-    expresso_sample = _load_expresso_sample(args.sample_size, args.seed)
-
-    # ── 2 & 3. Generate synthetic rows ────────────────────────────────────────
+    # ── 1–3. Seed data and synthetic rows ─────────────────────────────────────
     if args.no_ctgan:
+        expresso = _load_expresso_sample(None, args.seed)
         print("[2/6] Skipping CTGAN (--no-ctgan)")
-        synth = _generate_statistical(expresso_sample, n_generate, args.seed)
+        synth = _generate_statistical(expresso, args.seed)
     else:
+        expresso_sample = _load_expresso_sample(args.sample_size, args.seed)
         model = _train_ctgan(
             expresso_sample, args.epochs, args.batch_size, args.seed
         )
@@ -549,7 +644,7 @@ def main() -> None:
           f"columns: {list(synth.columns)}")
 
     # ── 4. Post-process ────────────────────────────────────────────────────────
-    synth = _post_process(synth, rng, n_target)
+    synth = _post_process(synth, rng, n_target, allow_replacement=not args.no_ctgan)
 
     # ── 5. Add user IDs and reorder columns ───────────────────────────────────
     synth.insert(0, "user_id", _assign_user_ids(len(synth)))
